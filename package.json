@@ -1,0 +1,22 @@
+{
+  "name": "pi-ipy",
+  "version": "0.1.0",
+  "description": "Run Python scripts from a temp file you can re-run and edit — gives pi a home for \"write a program\" instead of a bash heredoc",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "main": "index.ts",
+  "scripts": {
+    "smoke": "node scripts/smoke.mjs"
+  }
+}
