@@ -37,7 +37,8 @@
 3. `store.saveScript()` 消毒名字 → 临时文件 + `rename` 原子替换；**同名同内容即复用**（不动文件，返回 `reused: true`）；
 4. `lib/run.ts` spawn `python3 -u`，`detached: true` 建进程组，cwd 取 `ctx.cwd`；
 5. `store.appendManifest()` 记一条：时间 / 名字 / hash / purpose / 退出码 / 耗时；
-6. `renderRun()` 渲染给模型看，`structuredContent` 给 codemode 脚本用。
+6. `renderRun()` 渲染给模型看：`create` 时多两行**复用提示** —— `otherScripts()` 列出本会话其它脚本（最多 3 条、按最近运行排序、不带相似度打分），加一句 `to change it: edit that file, then ipy({path}) — don't send the code again`；
+7. `structuredContent` 给 codemode 脚本用。
 
 **`ipy({path})`（重跑）** 跳过 2、3 的写入，直接校验文件存在再执行；不存在时**报错里点名两条恢复路径**（`ipy({list:true})` / 用 `code` 重写）。
 
@@ -62,6 +63,7 @@
 
 ## 五、为什么这么切（关键取舍）
 
+- **复用提示写在「工具结果」里，不是加第 3 条 guideline**：guideline 只在会话开头被读一次，而「到底重发代码还是 edit 旧文件」是在**下一轮**才决的；结果文本正好出现在那一轮的上下文里（实测 2/3 次重发代码，就是这句话要打的点）。提示**不做相似度打分**：purpose 用什么语言写都不一定，模糊匹配会瞎认亲；只把邻居名字摆出来让模型自己判断。`PI_IPY_QUIET=1` 把这两行整体关掉，供 A/B 对照（`scripts/acc-reuse.sh`）。
 - **放 /tmp 而不是用户缓存目录**：/tmp 会话级、重启自清，不污染 git、不触发"脏仓库"守卫，与 Claude Code 一致。代价是跨会话不可复用——这是有意接受的。
 - **复用靠内容 hash，不靠时间戳**：同名同内容 = 复用（不改文件、不改 mtime）；同名新内容 = 覆写，这就是"改脚本"。hash 只做判据，文件名始终是模型给的语义名——因为 40 轮后模型能记住 `parse_logs.py`，记不住 `a3f9c1.py`。
 - **不做 `edit` 动作**：改脚本就用 pi 内置的 `read` / `edit` 改那个文件。组合优于自造，而且脚本顺带对人可见。

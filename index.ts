@@ -169,12 +169,36 @@ function renderList(dir: string, scripts: ScriptInfo[]): string {
 	return [`Scripts in this session (${dir}):`, ...rows].join("\n");
 }
 
+/**
+ * The scripts a `create` is about to become a sibling of, most recently run first.
+ *
+ * Deliberately no similarity scoring: purposes arrive in whatever language the user
+ * speaks, and a fuzzy match would sometimes assert that two unrelated scripts are
+ * related. Naming the neighbours and letting the model judge relevance costs one line
+ * and stays honest — but it is the only thing that makes re-use possible once the
+ * earlier script has fallen out of the model's context, which is where re-use pays.
+ * Set `PI_IPY_QUIET=1` to switch off everything this result says about re-use — the two
+ * lines below are the whole re-use nudge, and scripts/acc-reuse.sh measures them as a unit.
+ */
+async function otherScripts(dir: string, scriptPath: string, limit = 3): Promise<string[]> {
+	if (process.env.PI_IPY_QUIET) return [];
+	const scripts = await listScripts(dir).catch(() => []);
+	return scripts
+		.filter((script) => script.path !== scriptPath)
+		.sort((a, b) => (b.lastRunAt ?? "").localeCompare(a.lastRunAt ?? ""))
+		.slice(0, limit)
+		.map((script) => `${script.name}${script.purpose ? ` — ${script.purpose}` : ""}`);
+}
+
 function renderRun(options: {
 	scriptPath: string;
 	state: string;
 	result: RunResult;
 	timeoutSeconds?: number;
 	fullOutputPath?: string;
+	alsoInSession?: string[];
+	/** Set for `create`: repeat the one instruction the next turn will need. */
+	suggestEdit?: boolean;
 }): string {
 	const { result } = options;
 	const lines = [`script: ${options.scriptPath} (${options.state})`];
@@ -183,6 +207,16 @@ function renderRun(options: {
 	if (result.timedOut) meta.push(`killed: timed out after ${options.timeoutSeconds}s`);
 	else if (result.aborted) meta.push("killed: aborted");
 	lines.push(meta.join(" · "));
+	if (options.alsoInSession?.length) {
+		lines.push(`also in this session: ${options.alsoInSession.join(" | ")}`);
+	}
+	if (options.suggestEdit) {
+		// The guideline says this too, but it is read once at the top of the session, while
+		// this line is read on the turn *before* the one where re-sending the code is the
+		// tempting move. Measured: without it the model re-sent the code in 2 of 3 sessions
+		// that had the script one turn back in context.
+		lines.push(`to change it: edit that file, then ipy({path: "${options.scriptPath}"}) — don't send the code again`);
+	}
 
 	const stdout = result.stdout.replace(/\n+$/, "");
 	const stderr = result.stderr.replace(/\n+$/, "");
@@ -238,6 +272,7 @@ export default function (pi: ExtensionAPI) {
 			let hash: string;
 			let state: string;
 			let reused = false;
+			let alsoInSession: string[] = [];
 
 			if (mode.kind === "create") {
 				const saved = await saveScript(dir, mode.name ?? fallbackName(mode.purpose), mode.code);
@@ -245,6 +280,7 @@ export default function (pi: ExtensionAPI) {
 				hash = saved.hash;
 				reused = saved.reused;
 				state = reused ? "already on disk, unchanged" : "written";
+				alsoInSession = await otherScripts(dir, scriptPath);
 			} else {
 				scriptPath = resolve(ctx.cwd, mode.path);
 				const info = await lstat(scriptPath).catch(() => undefined);
@@ -295,6 +331,8 @@ export default function (pi: ExtensionAPI) {
 				result,
 				timeoutSeconds: mode.timeoutMs === undefined ? undefined : mode.timeoutMs / 1000,
 				fullOutputPath,
+				alsoInSession,
+				suggestEdit: mode.kind === "create" && !process.env.PI_IPY_QUIET,
 			});
 
 			return {

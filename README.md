@@ -2,7 +2,9 @@
 
 A Python scratchpad for [pi](https://github.com/earendil-works/pi-mono). The model
 writes a script, ipy stores it in a temp file, runs it, and hands the path back — so
-the next run is an `edit` and a re-run instead of another 40-line heredoc.
+the next run *can* be an `edit` and a re-run instead of another 40-line heredoc. Whether
+it actually is one is measured, not assumed (about 4 times in 11 — see
+[Re-use](#re-use-is-the-part-that-does-not-happen-by-itself)).
 
 ```
 before   bash -c "python3 - <<'EOF'
@@ -13,8 +15,10 @@ before   bash -c "python3 - <<'EOF'
 after    ipy({ name: "tool_calls_by_session",
                purpose: "top-3 tools per pi session file",
                code: "… 40 lines …" })
-         # → script path: /tmp/pi-ipy-1000/pi-ipy-1a2b3c4d/tool_calls_by_session.py  exit code: 0
-         # next turn: ipy({ path: "…/tool_calls_by_session.py", args: ["--day", "09-30"] })
+         # → script: /tmp/pi-ipy-1000/ipy-acc-01a0fd2b/tool_calls_by_session.py (written)
+         #           exit: 0 · 0.31s
+         #           to change it: edit that file, then ipy({path: "…"}) — don't send the code again
+         # next turn: edit that file, ipy({ path: "…/tool_calls_by_session.py", args: ["--day", "09-30"] })
 ```
 
 ## Tool surface
@@ -50,9 +54,34 @@ elided, the whole thing is written to a file whose path comes back as `output_pa
   script behind. `.index.jsonl` appends one line per run: timestamp, name, path,
   content hash, purpose, mode, exit code and wall time.
 
+## Re-use is the part that does not happen by itself
+
+Handing back a path is not enough. Measured with `scripts/acc-reuse.sh` (create a script,
+next turn ask for a small change, 11 sessions per arm): the intended `edit` + `ipy({path})`
+happened in **4 of 11** sessions with the lines below and **2 of 11** without them — an
+effect this sample cannot separate from noise (turn 1, which the lines cannot influence,
+differed 19 vs 27 re-sent scripts between the same two arms). What the numbers do show is
+where the bytes actually go: re-sending whole scripts **inside one turn** (one session sent
+five full versions) costs more than the turn-2 decision everyone worries about. So a
+`create` result carries two extra lines aimed at that moment anyway:
+
+```
+also in this session: parse_logs.py — parse NVR logs | fetch_week.py — pull one week
+
+to change it: edit that file, then ipy({path: "/tmp/…/tool_calls_by_session.py"}) — don't send the code again
+```
+
+The first line names the session's other scripts (most recently run first, at most three,
+no similarity scoring — purposes come in whatever language the user speaks, and a fuzzy
+match would assert relationships that are not there). The second repeats the one
+instruction that matters on the *next* turn, where the guideline at the top of the
+session is far away. `PI_IPY_QUIET=1` switches both off, which is how the arms of
+`scripts/acc-reuse.sh` are defined.
+
 ## Execution
 
 - `python3` from `PATH`, or `$PI_IPY_PYTHON` when set; the working directory is pi's.
+  `$PI_IPY_QUIET` turns off the two re-use lines in the result (for A/B measurement).
 - The child runs detached in its own process group, and abort/timeout kills the **whole
   group** — a script that spawned something else does not outlive it.
 - Results also come back as `structuredContent` (`exit_code`, `stdout`, `stderr`,
@@ -72,11 +101,28 @@ ln -sfn "$PWD" "${PI_AGENT_DIR:-$HOME/.pi/agent}/extensions/pi-ipy"
 ## Verify
 
 ```sh
-node scripts/smoke.mjs    # naming, reuse, slug escaping, atomic writes, truncation, abort, timeout
+node scripts/smoke.mjs    # 50 checks: naming, reuse, slug escaping, atomic writes, truncation, abort, timeout
 ```
 
 The interesting check is process-group teardown: the script spawns a grandchild that
 writes to a file on a delay, ipy is aborted, and the test fails if that file appears.
+
+All 50 green only proves the tool *works*. Whether the model *uses* it is a different
+question, and one run cannot answer it — the same prompt on the same model with a
+byte-identical system prompt used ipy 3 times out of 4 one afternoon and 0 times out of 5
+the next. Two harnesses report rates instead of anecdotes, and both pin the model:
+
+```sh
+bash scripts/acc-rate.sh  <model> 4              # does it reach for ipy, or for a heredoc?
+bash scripts/acc-rate.sh  <model> 4 -xt ipy      # baseline: ipy not loaded
+bash scripts/acc-reuse.sh <model> 3              # edit + re-run, or send the code again?
+PI_IPY_QUIET=1 bash scripts/acc-reuse.sh <model> 3   # the same, without the re-use lines
+```
+
+Measured so far (`deepseek-v4.1-flash`, small n, read as direction not proof): 3/4 runs
+reached for ipy with 0/4 python heredocs; the baseline solved 3/4 prompts in plain shell,
+so that prompt cannot show displacement. Attribution is written up in
+[docs/agents-dot-md/environment.md](docs/agents-dot-md/environment.md).
 
 ## The part that actually changes behaviour
 
@@ -96,10 +142,11 @@ already frame bash as a *file* tool (`Use bash for file operations like ls, rg, 
 so "write a program" was an unowned slot, and ipy takes that slot rather than fighting
 bash for the rest.
 
-Measured on the same prompt with ipy on and off (`pi -xt ipy`): without it, the model
-pipes 40-line Python heredocs through bash; with it, bash is used only to locate files
-and the code goes to ipy. The procedure is written up in
-[docs/agents-dot-md/environment.md](docs/agents-dot-md/environment.md).
+Measured on the same prompt with ipy on and off, over several runs each (`pi -xt ipy` for
+the baseline): without it the model pipes Python through bash heredocs; with it, bash is
+left for locating files and the code goes to ipy. The rate is high but not 100%, and the
+same prompt is what determines whether the baseline *needs* Python at all — the procedure
+and the numbers are in [docs/agents-dot-md/environment.md](docs/agents-dot-md/environment.md).
 
 ## Layout
 
@@ -107,6 +154,8 @@ and the code goes to ipy. The procedure is written up in
 index.ts             tool registration: schema, prompt text, mode dispatch
 lib/store.ts         script directory, naming, atomic writes, manifest
 lib/run.ts           child process, output capture/truncation, group teardown
-scripts/smoke.mjs    the test suite
+scripts/smoke.mjs    the test suite (no model call, no API key)
+scripts/acc-rate.sh  pilot study: how often does the model reach for ipy?
+scripts/acc-reuse.sh pilot study: how often does it edit the script it just wrote?
 docs/                AGENTS.md-referenced module docs
 ```

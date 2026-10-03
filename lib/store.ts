@@ -43,6 +43,8 @@ export interface ScriptInfo {
 	purpose?: string;
 	/** Number of runs recorded in the manifest. */
 	runs: number;
+	/** ISO timestamp of this script's most recent manifest entry. */
+	lastRunAt?: string;
 }
 
 export interface ManifestEntry {
@@ -212,6 +214,7 @@ export async function listScripts(dir: string): Promise<ScriptInfo[]> {
 			lastExitCode: last?.exitCode,
 			purpose: [...runs].reverse().find((item) => item.purpose)?.purpose,
 			runs: runs.length,
+			lastRunAt: last?.ts,
 		});
 	}
 	infos.sort((a, b) => a.name.localeCompare(b.name));

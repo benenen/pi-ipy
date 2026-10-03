@@ -9,8 +9,9 @@
  * — extensions get their imports from pi's own jiti alias map at runtime.
  *
  * Covers: registration, all three modes, name sanitising, content-based reuse,
- * re-run by path, argv, a non-zero exit, output truncation, timeout, abort, and
- * whether abort actually kills the whole process group (grandchildren included).
+ * re-run by path, argv, a non-zero exit, output truncation, timeout, abort,
+ * whether abort actually kills the whole process group (grandchildren included),
+ * and the neighbour reminder a `create` adds for re-use.
  */
 
 import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
@@ -140,6 +141,30 @@ const autoNamed = await call({ code: "print('auto')", purpose: "Parse NVR logs q
 check("name derives from purpose", autoNamed.structuredContent.script_path.endsWith("parse_nvr_logs_quickly.py"), autoNamed.structuredContent.script_path);
 const bare = await call({ code: "print('bare')" });
 check("timestamped name as last resort", /script_\d{6}\.py$/.test(bare.structuredContent.script_path), bare.structuredContent.script_path);
+
+console.log("re-use prompting (the two result lines the model decides on)");
+const neighbour = await call({ code: "print('third')", name: "third_script", purpose: "count tool calls per session" });
+const neighbourLine = neighbour.content[0].text.split("\n").find((line) => line.startsWith("also in this session:")) ?? "";
+check("create names the session's other scripts", neighbourLine.length > 0, neighbour.content[0].text);
+check("the new script is not its own neighbour", !neighbourLine.includes("third_script.py"), neighbourLine);
+check(
+	"create repeats the edit-and-re-run instruction",
+	neighbour.content[0].text.includes(`ipy({path: "${neighbour.structuredContent.script_path}"})`),
+	neighbour.content[0].text,
+);
+check("run-by-path does not repeat it", !(await call({ path: neighbour.structuredContent.script_path })).content[0].text.includes("don't send the code again"));
+const later = await call({ code: "print('fourth')", name: "fourth_script", purpose: "unrelated purpose" });
+check(
+	"reminder carries the newest neighbour's purpose",
+	later.content[0].text.includes("third_script.py — count tool calls per session"),
+	later.content[0].text,
+);
+check("reminder is capped", (later.content[0].text.match(/ \| /g) ?? []).length <= 2, later.content[0].text);
+process.env.PI_IPY_QUIET = "1";
+const silenced = await call({ code: "print('quiet')", name: "quiet_script" });
+delete process.env.PI_IPY_QUIET;
+check("PI_IPY_QUIET silences the reminder", !silenced.content[0].text.includes("also in this session:"));
+check("PI_IPY_QUIET silences the edit instruction", !silenced.content[0].text.includes("don't send the code again"));
 
 console.log("failure paths");
 const failed = await call({ code: "import sys\nsys.stderr.write('boom\\n')\nsys.exit(3)", name: "failing" });
