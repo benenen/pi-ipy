@@ -10,6 +10,9 @@
  *   script cannot exhaust memory and take the machine down with it.
  * - Decoding goes through `StringDecoder`, so a chunk boundary never splits a
  *   multi-byte character (matters for non-ASCII output).
+ * - The reported exit code follows shell convention: a script killed by a signal is
+ *   reported as 128 + signal number (SIGKILL -> 137, anything else -> 143), so a
+ *   caller can tell "the script failed" from "the script was killed".
  */
 
 import { spawn } from "node:child_process";

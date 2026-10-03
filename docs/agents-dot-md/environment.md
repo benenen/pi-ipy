@@ -10,6 +10,9 @@
 | Node | 24.21.0（pi 自带的那个） |
 | Python | `python3` = 3.14.4（被执行的解释器；换版本用 `PI_IPY_PYTHON` 覆盖） |
 | 本仓库 | 一个本地 pi 扩展，路径无关；仓库在哪个目录，软链就指向哪 |
+| 类型检查 | `npm run typecheck`（= `tsc --noEmit`，当前 0 错误）。`typescript` / `@types/node` / `typebox` 是 devDependencies，`node_modules/` 不入库，首次先 `npm install` |
+
+`tsconfig.json`（`include: ["index.ts", "lib/**/*.ts"]`）同时是 **pi-lens 的权威配置**：没有它时 pi-lens 按 inferred settings 检查，会给每个 Node 内建模块和全局变量报假错误（`Cannot find module 'node:child_process'`、`Cannot find name 'Buffer'` 之类，见 docs/memory/known-pitfalls.md）。新增 `.ts` 文件时确认它落在 `include` 覆盖范围内。
 
 > ⚠️ 本仓库**不需要任何凭据**。若日后新增（token、内网地址等），一律放未入库文件（如 `dev-env.local.md`，加进 `.gitignore`），不要写进受版本控制的文件。
 
