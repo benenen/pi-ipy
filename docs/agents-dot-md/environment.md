@@ -67,7 +67,7 @@ PI_IPY_QUIET=1 bash scripts/acc-reuse.sh opencode-go/deepseek-v4.1-flash 25  # �
 两个仪表都自己跑 pi、自己抽 `tool_execution_start` 事件、自己出结论，不再手写抽事件的脚本（旧写法见 git 历史）。它们报的是：
 
 - `acc-rate.sh`：每题里 `ipy` 是否出现、是否退化成 `bash` + `python3 - <<'EOF'`。
-- `acc-reuse.sh`：第 1 轮建脚本、第 2 轮提个小改动（**必须是模型心算不出来的改动**，否则它会跳过工具）。判定按严格度排：`严格 edit+重跑`（最优）→ `脚本变陈旧`（重跑了旧脚本但没改，或重跑旧脚本 + 另写 heredoc 干新活）→ `重写`（同名覆写）→ `bash+heredoc` → `没调工具`；并回读 `/tmp/pi-ipy-*/ipy-acc-*/.index.jsonl` 的 `mode` 序列交叉验证。输出目录名带臂标识（`nudge`/`quiet`）与 pid —— 同秒启动的两臂曾算出同一个目录名而互相覆盖 rep 文件，两边日志却都正常（详见 docs/memory/known-pitfalls.md）。
+- `acc-reuse.sh`：第 1 轮建脚本、第 2 轮提个小改动（**必须是模型心算不出来的改动**，否则它会跳过工具）。现在用 `audit-reuse.py` 对齐 `toolCallId` 的开始/结束事件，只把成功修改后成功重跑**第 1 轮同一路径**的调用计入复用；同时统计 usage、参数字节、工具错误。旧数据没有固定输入/标准答案，不能由「出现过 code/path」推断脚本陈旧或正确。`event_span_seconds` 是日志消息时间跨度，不是 CLI 端到端耗时。输出目录名带臂标识（`nudge`/`quiet`）与 pid，避免同秒启动相互覆盖。
 
 提示词要挑「bash 单独干不了、Python 才顺手」的：一句话 `wc -l` 就能解决的任务两组都走 bash，测不出东西。`acc-rate.sh` 里的提示词要求把 `toolCall.name` 的调用次数和所在 assistant 消息的 `usage.totalTokens` 关联聚合 —— 关联两处嵌套字段，用 shell 硬拼很难受。
 
@@ -89,6 +89,42 @@ PI_IPY_QUIET=1 bash scripts/acc-reuse.sh opencode-go/deepseek-v4.1-flash 25  # �
 - 两条方法论比结论更值钱：① **噪声地板**——nudge 影响不到的第 1 轮，两组建脚本次数就差 19 vs 27（40%）；② **单跑与小 n 都会骗人**——同一模型、逐字节相同的系统提示，一次 4 跑用 ipy 3 次、另一次 5 轮 0 次；我曾凭 n=3 断言「中位数变体更容易让脚本陈旧」（2/3），n=25 后是 3/25 vs 3/25。
 - 真正的开销大头不在第 2 轮，而在**同一轮内的反复重发**：有一例一轮发了 5 遍完整脚本；另一例 `1 create + 5 run`。
 
-## 五、发布
+## 五、效率验收（2026-10-03）
+
+`scripts/acc-efficiency.py` 用固定种子生成只读 JSONL、独立计算均值/中位数标准答案，交替运行旧扩展快照和当前扩展。两臂都关闭扩展/skill/上下文文件自动发现，只显式加载被测扩展，保证环境相同；这是干净的 pi 核心环境测量，不能直接外推到所有日常扩展组合。每次两轮使用同一 session，记录真实 assistant usage（只统计 `message_end`，不重复统计 `agent_end`）、CLI 墙钟耗时和工具失败；实际执行输出与最终回答都对照标准答案。结果数值正确、仅 JSON 格式合规分开统计。
+
+```bash
+# BASELINE 为改动前版本的完整目录，至少有 index.ts 与 lib/store.ts、lib/run.ts。
+python3 -B scripts/acc-efficiency.py --model opencode-go/deepseek-v4.1-flash \
+  --baseline /tmp/pi-ipy-efficiency-baseline/index.ts --reps 5
+
+# 只重算已保存的数据，不再调模型。
+python3 -B scripts/acc-efficiency.py --reanalyze /tmp/ipy-efficiency-67oq9iur
+
+# 无模型的确定性比较：宿主真实 edit/ipy 工具、三种更新方式、独立答案校验。
+node scripts/bench-local.mjs /tmp/pi-ipy-efficiency-baseline/index.ts
+```
+
+改动前的快照取自 `41eca67`。本地 18 行脚本每种更新方式跑 10 次：完整重发的调用参数 634 B；内置 edit + ipy 重跑为 291 B / 2 次调用；合并 edits + ipy 为 229 B / 1 次调用（比完整重发少约 64%）。这些是 UTF-8 字节和工具调用数，**不能写成 token 节省率**。5000 行输出从 229,225 B 降至 51,575 B，少约 77.5%；这是修复模型视图绕过截断的确定性收益，文件仍保存捕获输出。
+
+真实模型 `opencode-go/deepseek-v4.1-flash` 两批各 n=5/臂，必须同时报告所有阶段：
+
+| 版本 / 范围 | 旧版 | 新版 |
+|---|---:|---:|
+| 仅合并 edits 的第二轮 totalTokens 中位数 | 19,278 | 30,257 |
+| 仅合并 edits 的两轮合计 totalTokens 中位数 | 29,322 | 52,277 |
+| 最终版（args 优先 + edits）第二轮 totalTokens 中位数 | 31,771 | 21,524 |
+| 最终版第二轮墙钟中位数 | 25.3 s | 17.6 s |
+| 最终版第二轮工具调用中位数 | 5 | 2 |
+| 最终版第二轮执行 + 回答数值正确 | 5/5 | 5/5 |
+| 最终版第二轮仅 JSON 格式合规 | 5/5 | 1/5 |
+| 最终版两轮合计 totalTokens 中位数 | 46,135 | 50,045 |
+| 最终版两轮合计墙钟中位数 | 51.1 s | 52.5 s |
+
+**结论范围**：最终版这一小批的修改阶段 token 少约 32%、耗时少约 30%；整轮没有检出收益，输出格式也未改善。前一批方向相反，不能把 n=5 的第二轮改善宣传成稳定的整体加速、普遍省 token 或准确率提升；优先保证输出预算、提供低成本调用形态，再积累更大样本。保留两批数据，不挑较好的一批替代全部证据。
+
+汇总保存在 `docs/efficiency-results.json`；原始记录 `/tmp/ipy-efficiency-a8ilztst` 与 `/tmp/ipy-efficiency-67oq9iur` 可能随系统清理消失。临时 agent 目录复制了本机认证/模型配置，目录 0700、文件 0600；不要将整份实验目录入库或上传，只共享不含凭据的派生统计。
+
+## 六、发布
 
 没有发布流程，也没有版本号要维护（扩展只在本地用）。要给别人用就把仓库推上去，对方自己按上面的软链方式装。

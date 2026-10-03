@@ -1,0 +1,284 @@
+{
+  "date": "2026-10-03",
+  "baseline_commit": "41eca67",
+  "notes": [
+    "Small samples: 5 independent two-turn sessions per arm in each run.",
+    "totalTokens includes cached context; byte counts are not tokens.",
+    "Correct numerical results and strict JSON format are scored separately.",
+    "Both arms use the same clean pi core context; installed third-party extensions are excluded."
+  ],
+  "local": {
+    "changes": [
+      {
+        "strategy": "resend",
+        "reps": 10,
+        "calls_per_change": 1,
+        "argument_bytes_per_change": 634,
+        "result_bytes_per_change": 443,
+        "local_wall_ms_median": 53.27031999999997
+      },
+      {
+        "strategy": "edit_then_run",
+        "reps": 10,
+        "calls_per_change": 2,
+        "argument_bytes_per_change": 291,
+        "result_bytes_per_change": 431,
+        "local_wall_ms_median": 47.90949750000004
+      },
+      {
+        "strategy": "edit_and_run",
+        "reps": 10,
+        "calls_per_change": 1,
+        "argument_bytes_per_change": 229,
+        "result_bytes_per_change": 315,
+        "local_wall_ms_median": 66.76282950000041
+      }
+    ],
+    "output_caps": [
+      {
+        "strategy": "resend",
+        "model_text_bytes": 229225
+      },
+      {
+        "strategy": "edit_and_run",
+        "model_text_bytes": 51575
+      }
+    ]
+  },
+  "model_runs": [
+    {
+      "variant": "edit_and_run",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "input_sha256": "2b4ab6a716120520bce7cec7b40dfc1de6adf4af1c5c52397830e4e2ccdcbab9",
+      "extension_sha256": {
+        "baseline": {
+          "index.ts": "327099ddaf703a46a348e6de2c57fefdcc6973a52e35c9343c521de035939c7d",
+          "lib/store.ts": "9f4100b28cb4c2b28076ba25471dfc4c1a3695e4b1497ad76a335a73b0e98832",
+          "lib/run.ts": "239e927cdf9262fd837a1aade65c4b99efa46b66e260c74ec0126c3650fb593a"
+        },
+        "candidate": {
+          "index.ts": "8a2faa49533cbbc6b51ae066f89ae5ace3c4bb5f142a788d4bffb7a6c9b8caf6",
+          "lib/store.ts": "899fa05ac654d775e9d09678a0c77ad837306314c128c5fcc55c9b1202537e69",
+          "lib/run.ts": "239e927cdf9262fd837a1aade65c4b99efa46b66e260c74ec0126c3650fb593a"
+        }
+      },
+      "summary": {
+        "baseline": {
+          "reps": 5,
+          "turn1": {
+            "correct": 5,
+            "format_correct": 4,
+            "successful_edit_run": 0,
+            "wall_seconds_median": 21.406699326005764,
+            "tool_calls_median": 2,
+            "code_bytes_median": 1099,
+            "patch_bytes_median": 0,
+            "tool_args_bytes_median": 1483,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 4050,
+              "output": 871,
+              "cacheRead": 5504,
+              "cacheWrite": 0,
+              "totalTokens": 10542
+            }
+          },
+          "turn2": {
+            "correct": 5,
+            "format_correct": 3,
+            "successful_edit_run": 4,
+            "wall_seconds_median": 19.3012855900015,
+            "tool_calls_median": 3,
+            "code_bytes_median": 0,
+            "patch_bytes_median": 0,
+            "tool_args_bytes_median": 1290,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 1466,
+              "output": 731,
+              "cacheRead": 17152,
+              "cacheWrite": 0,
+              "totalTokens": 19278
+            }
+          },
+          "both_turns": {
+            "wall_seconds_median": 46.22318958901451,
+            "usage_median": {
+              "input": 5516,
+              "output": 1602,
+              "cacheRead": 22272,
+              "cacheWrite": 0,
+              "totalTokens": 29322
+            }
+          }
+        },
+        "candidate": {
+          "reps": 5,
+          "turn1": {
+            "correct": 5,
+            "format_correct": 4,
+            "successful_edit_run": 0,
+            "wall_seconds_median": 26.42290457499621,
+            "tool_calls_median": 3,
+            "code_bytes_median": 1160,
+            "patch_bytes_median": 0,
+            "tool_args_bytes_median": 2548,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 4551,
+              "output": 1306,
+              "cacheRead": 9344,
+              "cacheWrite": 0,
+              "totalTokens": 15183
+            }
+          },
+          "turn2": {
+            "correct": 5,
+            "format_correct": 4,
+            "successful_edit_run": 2,
+            "wall_seconds_median": 24.01280222000787,
+            "tool_calls_median": 4,
+            "code_bytes_median": 0,
+            "patch_bytes_median": 0,
+            "tool_args_bytes_median": 2873,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 1996,
+              "output": 1388,
+              "cacheRead": 27520,
+              "cacheWrite": 0,
+              "totalTokens": 30257
+            }
+          },
+          "both_turns": {
+            "wall_seconds_median": 51.862391735005076,
+            "usage_median": {
+              "input": 7250,
+              "output": 3043,
+              "cacheRead": 41984,
+              "cacheWrite": 0,
+              "totalTokens": 52277
+            }
+          }
+        }
+      }
+    },
+    {
+      "variant": "args_first_edit_and_run",
+      "model": "opencode-go/deepseek-v4.1-flash",
+      "input_sha256": "2b4ab6a716120520bce7cec7b40dfc1de6adf4af1c5c52397830e4e2ccdcbab9",
+      "extension_sha256": {
+        "baseline": {
+          "index.ts": "327099ddaf703a46a348e6de2c57fefdcc6973a52e35c9343c521de035939c7d",
+          "lib/store.ts": "9f4100b28cb4c2b28076ba25471dfc4c1a3695e4b1497ad76a335a73b0e98832",
+          "lib/run.ts": "239e927cdf9262fd837a1aade65c4b99efa46b66e260c74ec0126c3650fb593a"
+        },
+        "candidate": {
+          "index.ts": "5975b30fadbf5c3012cebf9f5ae17b18799eda200e7b64119a3e99a386989ccd",
+          "lib/store.ts": "899fa05ac654d775e9d09678a0c77ad837306314c128c5fcc55c9b1202537e69",
+          "lib/run.ts": "25720faf89dd600f54318032cf8bfd0d31d9478981f47d526ac40a9f1c3fe87d"
+        }
+      },
+      "summary": {
+        "baseline": {
+          "reps": 5,
+          "turn1": {
+            "correct": 4,
+            "format_correct": 4,
+            "successful_edit_run": 1,
+            "wall_seconds_median": 23.919555137006682,
+            "tool_calls_median": 3,
+            "code_bytes_median": 1133,
+            "patch_bytes_median": 0,
+            "tool_args_bytes_median": 2096,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 4574,
+              "output": 1369,
+              "cacheRead": 9472,
+              "cacheWrite": 0,
+              "totalTokens": 15013
+            }
+          },
+          "turn2": {
+            "correct": 5,
+            "format_correct": 5,
+            "successful_edit_run": 3,
+            "wall_seconds_median": 25.254146488005063,
+            "tool_calls_median": 5,
+            "code_bytes_median": 0,
+            "patch_bytes_median": 0,
+            "tool_args_bytes_median": 1917,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 2436,
+              "output": 1175,
+              "cacheRead": 28160,
+              "cacheWrite": 0,
+              "totalTokens": 31771
+            }
+          },
+          "both_turns": {
+            "wall_seconds_median": 51.104767602999345,
+            "usage_median": {
+              "input": 7126,
+              "output": 2657,
+              "cacheRead": 36352,
+              "cacheWrite": 0,
+              "totalTokens": 46135
+            }
+          }
+        },
+        "candidate": {
+          "reps": 5,
+          "turn1": {
+            "correct": 5,
+            "format_correct": 1,
+            "successful_edit_run": 1,
+            "wall_seconds_median": 19.39082036000036,
+            "tool_calls_median": 3,
+            "code_bytes_median": 1130,
+            "patch_bytes_median": 0,
+            "tool_args_bytes_median": 1735,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 4455,
+              "output": 1112,
+              "cacheRead": 9216,
+              "cacheWrite": 0,
+              "totalTokens": 14783
+            }
+          },
+          "turn2": {
+            "correct": 5,
+            "format_correct": 1,
+            "successful_edit_run": 2,
+            "wall_seconds_median": 17.589574318000814,
+            "tool_calls_median": 2,
+            "code_bytes_median": 0,
+            "patch_bytes_median": 842,
+            "tool_args_bytes_median": 1695,
+            "tool_errors_median": 0,
+            "usage_median": {
+              "input": 1369,
+              "output": 920,
+              "cacheRead": 20096,
+              "cacheWrite": 0,
+              "totalTokens": 21524
+            }
+          },
+          "both_turns": {
+            "wall_seconds_median": 52.49235005398805,
+            "usage_median": {
+              "input": 7006,
+              "output": 2727,
+              "cacheRead": 38656,
+              "cacheWrite": 0,
+              "totalTokens": 50045
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -14,49 +14,17 @@
  * and the neighbour reminder a `create` adds for re-use.
  */
 
-import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { resolvePiEntry } from "./pi-loader.mjs";
 
 const execFileAsync = promisify(execFile);
 
-const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 const EXTENSION = new URL("../index.ts", import.meta.url).pathname;
 
-/** Locate the pi package inside the installation that owns the `pi` binary. */
-async function resolvePiEntry() {
-	if (process.env.PI_PACKAGE_ENTRY) return process.env.PI_PACKAGE_ENTRY;
-	const which = await execFileAsync("which", ["pi"])
-		.then(({ stdout }) => stdout.trim())
-		.catch(() => {
-			throw new Error("cannot find the `pi` executable on PATH; set PI_PACKAGE_ENTRY to its dist/index.js");
-		});
-	// `pi` may be a shim in <prefix>/bin or a symlink straight into the package; walk up
-	// from both and identify the package by its manifest rather than by guessing a layout.
-	for (const start of [which, await realpath(which).catch(() => which)]) {
-		let dir = dirname(start);
-		for (;;) {
-			const manifest = join(dir, "package.json");
-			if (existsSync(manifest)) {
-				try {
-					if (JSON.parse(readFileSync(manifest, "utf8")).name === PI_PACKAGE) {
-						const entry = join(dir, "dist/index.js");
-						if (existsSync(entry)) return entry;
-					}
-				} catch {
-					// unreadable or malformed manifest: keep walking up
-				}
-			}
-			const parent = dirname(dir);
-			if (parent === dir) break;
-			dir = parent;
-		}
-	}
-	throw new Error(`cannot locate ${PI_PACKAGE} from \`pi\` at ${which}; set PI_PACKAGE_ENTRY to its dist/index.js`);
-}
 
 let failures = 0;
 let checks = 0;
@@ -83,7 +51,7 @@ const ctx = {
 };
 
 console.log("load");
-const loaded = await discoverAndLoadExtensions([EXTENSION], workdir);
+const loaded = await discoverAndLoadExtensions([EXTENSION], workdir, join(workdir, "agent"));
 check("no load errors", loaded.errors.length === 0, JSON.stringify(loaded.errors));
 const tool = loaded.extensions
 	.flatMap((extension) => [...extension.tools.values()])
@@ -132,6 +100,50 @@ const withArgs = await call({
 });
 check("args reach argv", withArgs.structuredContent.stdout.includes("'--day', '09-30'"), withArgs.structuredContent.stdout);
 
+console.log("edit and run in one call");
+const patched = await call({ path: third.structuredContent.script_path, edits: [{ oldText: "changed", newText: "patched" }] });
+check("edit is executed in the same call", patched.structuredContent.stdout.trim() === "patched");
+check("edited file persists", (await readFile(third.structuredContent.script_path, "utf8")).includes("patched"));
+const unchanged = await readFile(third.structuredContent.script_path, "utf8");
+for (const [label, edits] of [
+	["missing match", [{ oldText: "patched", newText: "partial" }, { oldText: "absent", newText: "x" }]],
+	["empty edits", []],
+	["empty oldText", [{ oldText: "", newText: "x" }]],
+	["overlapping edits", [{ oldText: "patched", newText: "x" }, { oldText: "patch", newText: "y" }]],
+]) {
+	let error;
+	try { await call({ path: third.structuredContent.script_path, edits }); } catch (caught) { error = caught; }
+	check(`${label} rejected`, error?.message.startsWith("ipy:"));
+	check(`${label} leaves the whole file untouched`, (await readFile(third.structuredContent.script_path, "utf8")) === unchanged);
+}
+const duplicate = await call({ name: "duplicate", code: "print('xx')" });
+let ambiguous;
+try { await call({ path: duplicate.structuredContent.script_path, edits: [{ oldText: "x", newText: "y" }] }); } catch (error) { ambiguous = error; }
+check("ambiguous match rejected", ambiguous?.message.includes("exactly once"));
+const outside = join(workdir, "outside.py");
+await writeFile(outside, "print('outside')");
+let outsideError;
+try { await call({ path: outside, edits: [{ oldText: "outside", newText: "changed" }] }); } catch (error) { outsideError = error; }
+check("patch outside the session rejected", outsideError?.message.startsWith("ipy:"));
+await symlink(outside, join(sessionDir, "linked.py"));
+let linkError;
+try { await call({ path: join(sessionDir, "linked.py"), edits: [{ oldText: "outside", newText: "changed" }] }); } catch (error) { linkError = error; }
+check("patch through a symlink rejected", linkError?.message.startsWith("ipy:"));
+check("external file untouched", (await readFile(outside, "utf8")) === "print('outside')");
+const pair = await call({ name: "pair", code: "print('first', 'second')" });
+const pairRun = await call({ path: pair.structuredContent.script_path, edits: [
+	{ oldText: "second", newText: "tail" }, { oldText: "first", newText: "head" },
+] });
+check("multiple disjoint edits run together", pairRun.structuredContent.stdout.trim() === "head tail");
+for (const params of [
+	{ code: "print(1)", edits: [{ oldText: "1", newText: "2" }] },
+	{ list: true, edits: [{ oldText: "1", newText: "2" }] },
+]) {
+	let error;
+	try { await call(params); } catch (caught) { error = caught; }
+	check("edits require path mode", error?.message.startsWith("ipy:"));
+}
+
 console.log("name sanitising");
 const escaped = await call({ code: "print('safe')", name: "../../evil" });
 check("traversal collapses to a bare name", escaped.structuredContent.script_path === join(sessionDir, "evil.py"), escaped.structuredContent.script_path);
@@ -149,7 +161,7 @@ check("create names the session's other scripts", neighbourLine.length > 0, neig
 check("the new script is not its own neighbour", !neighbourLine.includes("third_script.py"), neighbourLine);
 check(
 	"create repeats the edit-and-re-run instruction",
-	neighbour.content[0].text.includes(`ipy({path: "${neighbour.structuredContent.script_path}"})`),
+	neighbour.content[0].text.includes(`ipy({path: "${neighbour.structuredContent.script_path}", args:`) && neighbour.content[0].text.includes("add edits:"),
 	neighbour.content[0].text,
 );
 check("run-by-path does not repeat it", !(await call({ path: neighbour.structuredContent.script_path })).content[0].text.includes("don't send the code again"));
@@ -200,9 +212,14 @@ const big = await call({ code: "print('line' * 1)\nfor i in range(5000): print(i
 check("output_path set when truncated", typeof big.structuredContent.output_path === "string");
 if (big.structuredContent.output_path) {
 	const full = await stat(big.structuredContent.output_path);
-	check("full output is bigger than the model view", full.size > 0);
+	check("full output is bigger than the model view", full.size > Buffer.byteLength(big.content[0].text));
 }
 check("model view mentions the full output path", big.content[0].text.includes("full output:"));
+check("model view actually enforces the byte cap", Buffer.byteLength(big.content[0].text) < 50 * 1024 + 1024);
+check("model view retains the end of stdout", big.content[0].text.includes("4999 "));
+const wide = await call({ name: "wide", code: "import sys\nprint('字' * 30000)\nsys.stderr.write('尾' * 30000 + 'ERROR_SENTINEL')" });
+check("combined stdout/stderr has one byte budget", Buffer.byteLength(wide.content[0].text) < 50 * 1024 + 1024);
+check("truncated Unicode stays valid and keeps stderr tail", !wide.content[0].text.includes("\ufffd") && wide.content[0].text.includes("ERROR_SENTINEL"));
 
 console.log("timeout / abort / process group");
 const slow = await call({ code: "import time\ntime.sleep(30)", name: "slow", timeout: 1 });
@@ -233,6 +250,7 @@ check("list shows the purpose", listing.content[0].text.includes("smoke greeting
 check("list shows run counts", /1 run\(s\)|2 run\(s\)|3 run\(s\)/.test(listing.content[0].text));
 
 await rm(sessionDir, { recursive: true, force: true });
+await rm(workdir, { recursive: true, force: true });
 
 console.log(`\n${checks - failures}/${checks} checks passed`);
 process.exit(failures === 0 ? 0 : 1);

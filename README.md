@@ -18,23 +18,33 @@ after    ipy({ name: "tool_calls_by_session",
                code: "… 40 lines …" })
          # → script: /tmp/pi-ipy-1000/ipy-acc-01a0fd2b/tool_calls_by_session.py (written)
          #           exit: 0 · 0.31s
-         #           to change it: edit that file, then ipy({path: "…"}) — don't send the code again
-         # next turn: edit that file, ipy({ path: "…/tool_calls_by_session.py", args: ["--day", "09-30"] })
+         #           re-run with args for options; use edits for code changes
+         # next turn: ipy({ path: "…/tool_calls_by_session.py",
+         #                  edits: [{oldText: "limit = 5", newText: "limit = 3"}] })
 ```
 
 ## Tool surface
 
-One tool, three shapes — `code`, `path` and `list` are mutually exclusive:
+One tool, three modes — `code`, `path` and `list` are mutually exclusive;
+`path` can also apply `edits` before running:
 
 | call | effect |
 | --- | --- |
 | `ipy({ code, name?, purpose?, args?, timeout? })` | write the script to disk, then run it |
 | `ipy({ path, args?, timeout? })` | run a script an earlier call created |
+| `ipy({ path, edits: [{oldText, newText}], args?, timeout? })` | edit a session script and run it in one call |
 | `ipy({ list: true })` | list this session's scripts (name, size, run count, last exit code) |
 
 `args` goes through argv, so there is no shell quoting to escape. Output is capped at
-pi's own scale (2000 lines / 50 KB, whichever is hit first); when the middle is
-elided, the whole thing is written to a file whose path comes back as `output_path`.
+pi's own scale (2000 lines / 50 KB, whichever is hit first), keeping the tail;
+when truncated, captured output is saved to a file whose path comes back as `output_path`.
+Each stream has a 4 MiB capture ceiling, so the saved file also contains an omission
+marker when that ceiling was exceeded.
+
+`edits` matches the original file exactly: every `oldText` must occur once, and edits
+must not overlap. All replacements are validated before an atomic write; a failed
+match leaves the file untouched and does not run it. Editing is restricted to this
+session's scripts; ordinary `path` runs keep accepting external files.
 
 ## Where scripts live
 
@@ -76,8 +86,11 @@ still carries two extra lines:
 ```
 also in this session: parse_logs.py — parse NVR logs | fetch_week.py — pull one week
 
-to change it: edit that file, then ipy({path: "/tmp/…/tool_calls_by_session.py"}) — don't send the code again
+to change it: ipy({path: "/tmp/…/tool_calls_by_session.py", args: [...]}) for options, or add edits: [{oldText, newText}] for code changes — don't send the code again
 ```
+
+The old two-call reminder is the treatment measured above; the current single-call
+form is evaluated separately with `scripts/acc-efficiency.py`.
 
 The first line names the session's other scripts (most recently run first, at most three,
 no similarity scoring — purposes come in whatever language the user speaks, and a fuzzy
@@ -98,6 +111,17 @@ is how the arms of `scripts/acc-reuse.sh` are defined.
   so [codemode](docs/agents-dot-md/architecture.md) scripts can drive ipy directly —
   QuickJS has no filesystem, Python does.
 
+## Efficiency measurement
+
+`scripts/acc-efficiency.py` compares an old extension snapshot with this version on
+immutable input and an independent answer oracle. It reports actual usage, wall time,
+tool errors, correct numerical answers and JSON formatting separately. Local tool
+measurements show fewer transmitted bytes for small edits and bounded large output;
+the small model trials do **not** establish an overall token or speed improvement.
+Both trials, including the unfavorable one, are recorded in
+[environment.md](docs/agents-dot-md/environment.md#五效率验收2026-10-03) and
+[efficiency-results.json](docs/efficiency-results.json).
+
 ## Install
 
 pi discovers each **directory** under its agent dir's `extensions/`, so installing is a
@@ -110,13 +134,14 @@ ln -sfn "$PWD" "${PI_AGENT_DIR:-$HOME/.pi/agent}/extensions/pi-ipy"
 ## Verify
 
 ```sh
-node scripts/smoke.mjs    # 50 checks: naming, reuse, slug escaping, atomic writes, truncation, abort, timeout
+node scripts/smoke.mjs    # storage, edit transactions, bounded output, abort, timeout
+python3 -B scripts/test-efficiency.py  # successful execution and usage accounting
 ```
 
 The interesting check is process-group teardown: the script spawns a grandchild that
 writes to a file on a delay, ipy is aborted, and the test fails if that file appears.
 
-All 50 green only proves the tool *works*. Whether the model *uses* it is a different
+Passing smoke checks only proves the tool *works*. Whether the model *uses* it is a different
 question, and one run cannot answer it — the same prompt on the same model with a
 byte-identical system prompt used ipy 3 times out of 4 one afternoon and 0 times out of 5
 the next. Two harnesses report rates instead of anecdotes, and both pin the model:
@@ -142,8 +167,8 @@ carries two of pi's hooks: `promptSnippet` (one line in *Available tools*) and
 > Use ipy for anything beyond a trivial one-liner: parsing, data munging, loops, HTTP,
 > CSV/JSON work. Use bash only for short file/shell operations (ls, rg, git, cat).
 
-> ipy returns the script path: re-run it with `ipy({path})` and edit that file instead
-> of re-writing the code.
+> Put changing inputs/options in argv. Re-run with `ipy({path,args})`; for code
+> changes use `ipy({path,edits:[{oldText,newText}]})` instead of re-sending code.
 
 Two bullets, not ten: every guideline is permanent context, and piling them up dilutes
 all of them. The first one draws a boundary instead of making a request — pi's own rules
@@ -166,5 +191,7 @@ lib/run.ts           child process, output capture/truncation, group teardown
 scripts/smoke.mjs    the test suite (no model call, no API key)
 scripts/acc-rate.sh  pilot study: how often does the model reach for ipy?
 scripts/acc-reuse.sh A/B harness: does it edit the script, or re-send the code?
+scripts/acc-efficiency.py  fixed-input paired runs: correctness, tokens, wall time
+scripts/bench-local.mjs   deterministic comparison of call count and transmitted bytes
 docs/                AGENTS.md-referenced module docs
 ```

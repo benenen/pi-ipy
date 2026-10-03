@@ -19,7 +19,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Shared length cap for script and directory names, to bound path length. */
@@ -54,7 +54,7 @@ export interface ManifestEntry {
 	/** Content sha256, truncated to 16 chars: "same name + same hash" means reuse. */
 	hash: string;
 	purpose?: string;
-	mode: "create" | "run";
+	mode: "create" | "run" | "edit";
 	reused: boolean;
 	exitCode: number;
 	wallTimeSeconds: number;
@@ -137,6 +137,52 @@ export interface SaveResult {
 	/** True when name and content both matched the existing file (nothing was written). */
 	reused: boolean;
 	hash: string;
+}
+
+export interface ScriptEdit {
+	oldText: string;
+	newText: string;
+}
+
+/** Apply exact replacements as one transaction, restricted to this session's scripts. */
+export async function editScript(dir: string, path: string, edits: ScriptEdit[]): Promise<SaveResult> {
+	const target = resolve(path);
+	if (dirname(target) !== resolve(dir) || !target.endsWith(".py")) {
+		throw new Error("ipy: edits require a .py file in this session; use ipy({list:true}) to find its path.");
+	}
+	return withFileMutationQueue(target, async () => {
+		const info = await lstat(target);
+		if (!info.isFile() || info.isSymbolicLink()) {
+			throw new Error("ipy: edits require a regular script file; use ipy({list:true}) to find one.");
+		}
+		const original = await readFile(target, "utf8");
+		const changes = edits.map((edit) => {
+			const at = original.indexOf(edit.oldText);
+			if (at < 0 || original.indexOf(edit.oldText, at + 1) >= 0) {
+				throw new Error("ipy: each oldText must occur exactly once; read the script and include more surrounding text.");
+			}
+			return { at, end: at + edit.oldText.length, text: edit.newText };
+		}).sort((a, b) => a.at - b.at);
+		for (let i = 1; i < changes.length; i++) {
+			if (changes[i].at < changes[i - 1].end) {
+				throw new Error("ipy: edits overlap; combine overlapping changes into one replacement.");
+			}
+		}
+		let code = original;
+		for (const change of changes.reverse()) {
+			code = code.slice(0, change.at) + change.text + code.slice(change.end);
+		}
+		if (code === original) return { path: target, hash: sha256(code), reused: true };
+		const tmp = join(dir, `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+		try {
+			await writeFile(tmp, code, { mode: FILE_MODE });
+			await rename(tmp, target);
+		} catch (error) {
+			await unlink(tmp).catch(() => undefined);
+			throw error;
+		}
+		return { path: target, hash: sha256(code), reused: false };
+	});
 }
 
 /**

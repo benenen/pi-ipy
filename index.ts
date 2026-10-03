@@ -26,15 +26,17 @@ import {
 	truncateHead,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { type RunResult, runPython } from "./lib/run.ts";
 import {
 	appendManifest,
+	editScript,
 	hashFile,
 	listScripts,
 	saveFullOutput,
 	saveScript,
 	type ScriptInfo,
+	type ScriptEdit,
 	sessionDir,
 } from "./lib/store.ts";
 
@@ -66,6 +68,10 @@ const ipySchema = Type.Object({
 	path: Type.Optional(
 		Type.String({ description: "Path of an existing script to run, as returned by an earlier ipy call." }),
 	),
+	edits: Type.Optional(Type.Array(Type.Object({
+		oldText: Type.String({ minLength: 1 }),
+		newText: Type.String(),
+	}), { minItems: 1, description: "With path: edit and run in one call. Each oldText must match once in the original file; edits must not overlap. Send only changed text." })),
 	args: Type.Optional(Type.Array(Type.String(), { description: "Arguments passed to the script via argv." })),
 	timeout: Type.Optional(
 		Type.Number({ description: "Kill the script after this many seconds. Omit for no limit." }),
@@ -75,12 +81,12 @@ const ipySchema = Type.Object({
 	),
 });
 
-type IpyInput = typeof ipySchema.static;
+type IpyInput = Static<typeof ipySchema>;
 
 const ipyOutputSchema = Type.Object({
 	exit_code: Type.Number(),
-	stdout: Type.String({ description: "Captured stdout, mid-truncated to 1 MiB" }),
-	stderr: Type.String({ description: "Captured stderr, mid-truncated to 1 MiB" }),
+	stdout: Type.String({ description: "Captured stdout, head-truncated to 1 MiB / 2000 lines" }),
+	stderr: Type.String({ description: "Captured stderr, head-truncated to 1 MiB / 2000 lines" }),
 	script_path: Type.Optional(Type.String()),
 	reused: Type.Boolean({ description: "True when the script was already on disk with identical content" }),
 	wall_time_seconds: Type.Number(),
@@ -90,7 +96,7 @@ const ipyOutputSchema = Type.Object({
 });
 
 interface IpyDetails {
-	mode: "list" | "create" | "run";
+	mode: "list" | "create" | "run" | "edit";
 	scriptPath?: string;
 	/** Session script directory; set for `list` so callers can build paths. */
 	dir?: string;
@@ -104,11 +110,21 @@ interface IpyDetails {
 type Mode =
 	| { kind: "list" }
 	| { kind: "create"; code: string; name?: string; purpose?: string; args: string[]; timeoutMs?: number }
-	| { kind: "run"; path: string; args: string[]; timeoutMs?: number };
+	| { kind: "run"; path: string; edits?: ScriptEdit[]; args: string[]; timeoutMs?: number };
 
 function parseInput(params: IpyInput): Mode {
 	const code = params.code?.trim();
 	const path = params.path?.trim();
+	if (params.edits !== undefined) {
+		if (!path || code || params.list === true) {
+			throw new Error("ipy: edits must be combined with path only; use ipy({path, edits}).");
+		}
+		if (!Array.isArray(params.edits) || params.edits.length === 0 || params.edits.some(
+			(edit) => !edit || typeof edit.oldText !== "string" || !edit.oldText.length || typeof edit.newText !== "string",
+		)) {
+			throw new Error("ipy: edits must be a non-empty array of {oldText, newText}; oldText cannot be empty.");
+		}
+	}
 
 	if (params.list === true) {
 		if (code || path) throw new Error("ipy: `list` cannot be combined with `code` or `path`.");
@@ -133,7 +149,7 @@ function parseInput(params: IpyInput): Mode {
 	if (code) {
 		return { kind: "create", code, name: params.name, purpose: params.purpose, args, timeoutMs };
 	}
-	return { kind: "run", path: path as string, args, timeoutMs };
+	return { kind: "run", path: path as string, edits: params.edits, args, timeoutMs };
 }
 
 /**
@@ -196,6 +212,7 @@ function renderRun(options: {
 	scriptPath: string;
 	state: string;
 	result: RunResult;
+	outputView: string;
 	timeoutSeconds?: number;
 	fullOutputPath?: string;
 	alsoInSession?: string[];
@@ -213,18 +230,12 @@ function renderRun(options: {
 		lines.push(`also in this session: ${options.alsoInSession.join(" | ")}`);
 	}
 	if (options.suggestEdit) {
-		// The guideline says this too, but it is read once at the top of the session, while
-		// this line is read on the turn *before* the one where re-sending the code is the
-		// tempting move. Measured: without it the model re-sent the code in 2 of 3 sessions
-		// that had the script one turn back in context.
-		lines.push(`to change it: edit that file, then ipy({path: "${options.scriptPath}"}) — don't send the code again`);
+		// Put the path and the single-call edit form next to the script output.
+		// The earlier edit-then-run reminder had no demonstrated effect at n=25 per arm.
+		lines.push(`to change it: ipy({path: "${options.scriptPath}", args: [...]}) for options, or add edits: [{oldText, newText}] for code changes — don't send the code again`);
 	}
 
-	const stdout = result.stdout.replace(/\n+$/, "");
-	const stderr = result.stderr.replace(/\n+$/, "");
-	if (stdout) lines.push("--- stdout ---", stdout);
-	if (stderr) lines.push("--- stderr ---", stderr);
-	if (!stdout && !stderr) lines.push("(no output)");
+	lines.push(options.outputView || "(no output)");
 	if (options.fullOutputPath) lines.push(`full output: ${options.fullOutputPath}`);
 	return lines.join("\n");
 }
@@ -236,13 +247,13 @@ export default function (pi: ExtensionAPI) {
 		description:
 			`Write a Python script to a temp file and run it with ${pythonPath()}. ` +
 			"Pass `code` to create or replace a script, `path` to re-run one created earlier, or `list: true` to see this session's scripts. " +
-			"The script path comes back, so you can edit that file and re-run it instead of re-sending the code. " +
+			"To change a session script, pass path + edits [{oldText, newText}] to edit and run in one call. " +
 			"Arguments go through argv (`args`), so there is no shell quoting. " +
 			`Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first); when truncated, the full output is saved to a file.`,
 		promptSnippet: "Run Python scripts; writes them to a temp file you can re-run and edit",
 		promptGuidelines: [
 			"Use ipy for anything beyond a trivial one-liner: parsing, data munging, loops, HTTP, CSV/JSON work. Use bash only for short file/shell operations (ls, rg, git, cat).",
-			"ipy returns the script path: re-run it with ipy({path}) and edit that file instead of re-writing the code.",
+			"Put changing inputs/options in argv. Re-run with ipy({path,args}); for code changes use ipy({path,edits:[{oldText,newText}]}) instead of re-sending code.",
 		],
 		parameters: ipySchema,
 		outputSchema: ipyOutputSchema,
@@ -292,9 +303,17 @@ export default function (pi: ExtensionAPI) {
 							"call ipy({list:true}) to see what exists in this session, or write it again with ipy({code}).",
 					);
 				}
-				hash = await hashFile(scriptPath);
-				state = "existing script";
+				if (mode.edits) {
+					const saved = await editScript(dir, scriptPath, mode.edits);
+					hash = saved.hash;
+					reused = saved.reused;
+					state = "edited and run";
+				} else {
+					hash = await hashFile(scriptPath);
+					state = "existing script";
+				}
 			}
+			const runMode = mode.kind === "run" && mode.edits ? "edit" : mode.kind;
 
 			const result = await runPython({
 				pythonPath: pythonPath(),
@@ -311,7 +330,7 @@ export default function (pi: ExtensionAPI) {
 				path: scriptPath,
 				hash,
 				purpose: mode.kind === "create" ? mode.purpose : undefined,
-				mode: mode.kind,
+				mode: runMode,
 				reused,
 				exitCode: result.exitCode,
 				wallTimeSeconds: result.wallTimeSeconds,
@@ -319,7 +338,7 @@ export default function (pi: ExtensionAPI) {
 
 			const stdout = result.stdout.replace(/\n+$/, "");
 			const stderr = result.stderr.replace(/\n+$/, "");
-			const combined = [stdout, stderr].filter(Boolean).join("\n");
+			const combined = [stdout ? `--- stdout ---\n${stdout}` : "", stderr ? `--- stderr ---\n${stderr}` : ""].filter(Boolean).join("\n");
 			const view = truncateTail(combined, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
 
 			let fullOutputPath: string | undefined;
@@ -331,6 +350,7 @@ export default function (pi: ExtensionAPI) {
 				scriptPath,
 				state,
 				result,
+				outputView: view.content,
 				timeoutSeconds: mode.timeoutMs === undefined ? undefined : mode.timeoutMs / 1000,
 				fullOutputPath,
 				alsoInSession,
@@ -340,7 +360,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text }],
 				details: {
-					mode: mode.kind,
+					mode: runMode,
 					scriptPath,
 					reused,
 					exitCode: result.exitCode,

@@ -36,7 +36,7 @@
 guideline 是常驻 system prompt，**只写划界，不写号召**，多了会稀释成噪音。当前刻意只有 2 条（`index.ts` 的 `promptGuidelines`）：
 
 1. 「写程序用 ipy，短文件/命令用 bash」——分工划清；
-2. 「重跑用 `ipy({path})`，改脚本用 `edit` 改文件，不要重发代码」——复用闭环。
+2. 「会变化的输入/选项走 argv；重跑用 `ipy({path,args})`，改代码用 `ipy({path,edits})`，不要重发代码」——复用闭环。
 
 pi 自身已经把 bash 框成「文件操作」（`ls, rg, find`），所以"写程序"这个槽位本来是空的，ipy 占的是这个槽位。**不要**再加"记得用 ipy"这类号召式条目。
 
@@ -45,13 +45,15 @@ pi 自身已经把 bash 框成「文件操作」（`ls, rg, find`），所以"�
 改完代码至少跑一遍：
 
 ```bash
-# 全量自检（42 项），不需要 API key、不调模型
+# 全量自检，不需要 API key、不调模型
 node scripts/smoke.mjs
+python3 -B scripts/test-efficiency.py
+npm run typecheck
 ```
 
 `scripts/smoke.mjs` 走 pi **真实的扩展加载器**（`discoverAndLoadExtensions`）拿到注册结果，再直接驱动 `definition.execute(...)`。覆盖：三种调用模式、名字消毒、内容复用、按路径重跑、argv、非零退出、截断、超时、abort、**abort 是否连孙子进程一起杀**。
 
-> 本机没有 `tsc`，仓库里也没有 `tsconfig.json` / `node_modules`，因此**没有类型检查脚本**——不要为了"补一个 check 命令"而引入 typescript 依赖。类型问题靠编辑器 LSP 和 smoke 用例暴露。
+> 当前仓库已有 `tsconfig.json` 与 `npm run typecheck`（2026-10-03，见 `environment.md`）。使用已有开发依赖检查类型；运行时仍由宿主 pi 的加载器验证，类型检查不能替代 smoke。
 
 改「模型会不会真的先用 ipy」这一类行为，smoke 测不出来，要做 A/B：见 `environment.md` 的《验收 A/B》。
 

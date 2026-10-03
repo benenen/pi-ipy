@@ -28,6 +28,7 @@ MODEL="${1:?usage: acc-reuse.sh <model> <reps> [extra pi flags...]}"
 REPS="${2:?usage: acc-reuse.sh <model> <reps> [extra pi flags...]}"
 shift 2
 
+HARNESS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 SLUG="$(printf '%s%s' "$MODEL" "$*" | tr -c '[:alnum:]' '-')"
 # The two arms must not share a directory: PI_IPY_QUIET=1 is the control, and two arms started
@@ -56,102 +57,5 @@ for i in $(seq 1 "$REPS"); do
 	printf 'rep%s done\n' "$i"
 done
 
-python3 - "$OUT" "$REPS" "$MODEL" <<'PY'
-import glob, json, os, re, sys
-
-out, reps, model = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-SCRIPT_PATH = re.compile(r"script: (/tmp/\S+\.py)")
-
-
-def calls(path):
-    """[(toolName, args)] in order, as the harness saw them."""
-    seen = []
-    for line in open(path, encoding="utf-8", errors="replace"):
-        try:
-            e = json.loads(line)
-        except Exception:
-            continue
-        if e.get("type") == "tool_execution_start":
-            seen.append((e.get("toolName"), e.get("args") or {}))
-    return seen
-
-
-def run_script_path(path):
-    text = open(path, encoding="utf-8", errors="replace").read()
-    hits = SCRIPT_PATH.findall(text)
-    return os.path.basename(hits[-1]) if hits else None
-
-
-reuse = stale = rewrite = bash = none = 0
-print(f"\nmodel: {model}   flags: {' '.join(sys.argv[4:]) or '(none)'}   reps: {reps}")
-for i in range(1, reps + 1):
-    t1, t2 = f"{out}/rep{i}.turn1.json", f"{out}/rep{i}.turn2.json"
-    c1, c2 = calls(t1), calls(t2)
-    made = [n for n, _ in c1 if n == "ipy"]
-    heredoc1 = sum(1 for n, a in c1 if n == "bash" and "python3" in str(a.get("command", "")) and "<<" in str(a.get("command", "")))
-    script = run_script_path(t1)
-
-    edited = [n for n, a in c2 if n in ("edit", "write") and (script or "") in json.dumps(a)]
-    ipy_path = [a for n, a in c2 if n == "ipy" and a.get("path")]
-    ipy_code = [a for n, a in c2 if n == "ipy" and a.get("code")]
-    heredoc2 = sum(1 for n, a in c2 if n == "bash" and "python3" in str(a.get("command", "")) and "<<" in str(a.get("command", "")))
-    lines = [len(str(a.get("code", "")).splitlines()) for a in ipy_code]
-    # Re-sending code under the *same* name is how the file gets updated (ipy treats it as an
-    # overwrite), so it is not the same failure as scattering new names around: count both.
-    creates = [a.get("name") for n, a in c1 + c2 if n == "ipy" and a.get("code")]
-    names_note = "" if not creates else f"create×{len(creates)}/{len(set(creates))}名"
-
-    # Strictest verdict first: an edit that landed *and* was re-run is the flow the design
-    # promises. Re-running the untouched script is not re-use — the change was never applied
-    # (usually the model did the new work in a heredoc instead), and that stale file is worse
-    # than a rewrite, which at least leaves the script current.
-    if edited and ipy_path:
-        verdict = "严格 edit + 重跑 ✓"
-        reuse += 1
-    elif ipy_path and heredoc2:
-        verdict = "重跑旧脚本 + heredoc 干新活（脚本仍陈旧）"
-        stale += 1
-    elif ipy_path:
-        verdict = "按路径重跑（没改脚本，脚本仍陈旧）"
-        stale += 1
-    elif ipy_code and not ipy_path:
-        verdict = "重写（又发了一遍代码）"
-        rewrite += 1
-    elif heredoc2:
-        verdict = "bash + python heredoc"
-        bash += 1
-    elif edited:
-        verdict = "只改没跑"
-        none += 1
-    else:
-        verdict = "没调工具（或纯 shell）"
-        none += 1
-
-    t1_note = f"ipy×{len(made)}" if made else (f"heredoc×{heredoc1}" if heredoc1 else "无脚本")
-    t2_note = []
-    if edited:
-        t2_note.append(f"edit {script}" if script else "edit")
-    if ipy_path:
-        t2_note.append("ipy(path)")
-    if ipy_code:
-        t2_note.append(f"ipy(code, {lines[0] if lines else 0} 行)")
-    if heredoc2:
-        t2_note.append("bash+heredoc")
-    print(f"  rep{i}  turn1={t1_note:<12} turn2={' + '.join(t2_note) or '—':<40} {names_note:<18} {verdict}")
-
-    # Cross-check against the tool's own record of what happened in that session.
-    dirs = glob.glob(f"/tmp/pi-ipy-*/ipy-acc-{open(f'{out}/rep{i}.sid').read().strip()[:8]}")
-    for d in dirs:
-        modes = []
-        for line in open(f"{d}/.index.jsonl", encoding="utf-8", errors="replace"):
-            try:
-                m = json.loads(line)
-            except Exception:
-                continue
-            modes.append(m.get("mode"))
-        if modes:
-            print(f"        manifest: {modes}")
-
-print(f"\n  严格 edit+重跑  {reuse}/{reps}\n  脚本变陈旧      {stale}/{reps}\n  重写（同名字） {rewrite}/{reps}\n  bash+heredoc    {bash}/{reps}\n  没调工具/其它  {none}/{reps}")
-PY
+python3 "$HARNESS_DIR/audit-reuse.py" "$OUT"
 echo "raw: $OUT"
