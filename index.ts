@@ -178,7 +178,9 @@ function renderList(dir: string, scripts: ScriptInfo[]): string {
  * and stays honest — but it is the only thing that makes re-use possible once the
  * earlier script has fallen out of the model's context, which is where re-use pays.
  * Set `PI_IPY_QUIET=1` to switch off everything this result says about re-use — the two
- * lines below are the whole re-use nudge, and scripts/acc-reuse.sh measures them as a unit.
+ * lines below are the whole re-use nudge, and scripts/acc-reuse.sh measures them as a unit —
+ * at n=25 per arm the two arms came out 8/25 vs 7/25 (p=1.00), so these lines hand the path
+ * back to the model rather than change what it does (docs/memory/known-pitfalls.md).
  */
 async function otherScripts(dir: string, scriptPath: string, limit = 3): Promise<string[]> {
 	if (process.env.PI_IPY_QUIET) return [];

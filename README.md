@@ -3,8 +3,9 @@
 A Python scratchpad for [pi](https://github.com/earendil-works/pi-mono). The model
 writes a script, ipy stores it in a temp file, runs it, and hands the path back — so
 the next run *can* be an `edit` and a re-run instead of another 40-line heredoc. Whether
-it actually is one is measured, not assumed (about 4 times in 11 — see
-[Re-use](#re-use-is-the-part-that-does-not-happen-by-itself)).
+it actually is one is measured, not assumed (about 1 time in 3 — and what it does instead
+is mostly re-send the file under the same name — see
+[Re-use](#re-use-works-as-a-rewrite-rather-than-an-edit)).
 
 ```
 before   bash -c "python3 - <<'EOF'
@@ -54,16 +55,23 @@ elided, the whole thing is written to a file whose path comes back as `output_pa
   script behind. `.index.jsonl` appends one line per run: timestamp, name, path,
   content hash, purpose, mode, exit code and wall time.
 
-## Re-use is the part that does not happen by itself
+## Re-use works, as a rewrite rather than an edit
 
-Handing back a path is not enough. Measured with `scripts/acc-reuse.sh` (create a script,
-next turn ask for a small change, 11 sessions per arm): the intended `edit` + `ipy({path})`
-happened in **4 of 11** sessions with the lines below and **2 of 11** without them — an
-effect this sample cannot separate from noise (turn 1, which the lines cannot influence,
-differed 19 vs 27 re-sent scripts between the same two arms). What the numbers do show is
-where the bytes actually go: re-sending whole scripts **inside one turn** (one session sent
-five full versions) costs more than the turn-2 decision everyone worries about. So a
-`create` result carries two extra lines aimed at that moment anyway:
+Handing back a path is not enough to make the model *edit* the script — but it turns out
+nothing is. Measured with `scripts/acc-reuse.sh` (write a script, then ask for a change the
+model cannot work out in its head, model pinned, 25 sessions per arm): the intended `edit`
++ `ipy({path})` happened in **8 of 25** sessions with the two lines below and **7 of 25**
+with `PI_IPY_QUIET=1` — `p = 1.00`, a dead heat. An earlier wording of the second turn gave
+the same answer (4/11 vs 3/14), so this is not a sample-size artefact.
+
+What the model does instead is re-send the whole script under the **same name** (13 of 25 in
+both arms; 24 of 27 session-turns in an earlier sample), which `saveScript` treats as an
+overwrite. The file ends up current either way — **21 of 25** vs **20 of 25** — and no
+duplicate scripts pile up, so the price of a rewrite is re-sent tokens rather than a stale
+or littered directory: a genuinely stale script is rare (**3 of 25** in both arms). The
+bytes that hurt are the ones re-sent *inside one turn* — one session sent five full versions
+— which costs more than the turn-2 decision everyone worries about. So a `create` result
+still carries two extra lines:
 
 ```
 also in this session: parse_logs.py — parse NVR logs | fetch_week.py — pull one week
@@ -73,10 +81,11 @@ to change it: edit that file, then ipy({path: "/tmp/…/tool_calls_by_session.py
 
 The first line names the session's other scripts (most recently run first, at most three,
 no similarity scoring — purposes come in whatever language the user speaks, and a fuzzy
-match would assert relationships that are not there). The second repeats the one
-instruction that matters on the *next* turn, where the guideline at the top of the
-session is far away. `PI_IPY_QUIET=1` switches both off, which is how the arms of
-`scripts/acc-reuse.sh` are defined.
+match would assert relationships that are not there). The second repeats the instruction
+that matters on the *next* turn, where the guideline at the top of the session is far away;
+the A/B above says that repetition changes nothing measurable, so treat it as a reminder
+that hands the path back rather than as a lever. `PI_IPY_QUIET=1` switches both off, which
+is how the arms of `scripts/acc-reuse.sh` are defined.
 
 ## Execution
 
@@ -156,6 +165,6 @@ lib/store.ts         script directory, naming, atomic writes, manifest
 lib/run.ts           child process, output capture/truncation, group teardown
 scripts/smoke.mjs    the test suite (no model call, no API key)
 scripts/acc-rate.sh  pilot study: how often does the model reach for ipy?
-scripts/acc-reuse.sh pilot study: how often does it edit the script it just wrote?
+scripts/acc-reuse.sh A/B harness: does it edit the script, or re-send the code?
 docs/                AGENTS.md-referenced module docs
 ```

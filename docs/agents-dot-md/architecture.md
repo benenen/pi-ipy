@@ -37,7 +37,7 @@
 3. `store.saveScript()` 消毒名字 → 临时文件 + `rename` 原子替换；**同名同内容即复用**（不动文件，返回 `reused: true`）；
 4. `lib/run.ts` spawn `python3 -u`，`detached: true` 建进程组，cwd 取 `ctx.cwd`；
 5. `store.appendManifest()` 记一条：时间 / 名字 / hash / purpose / 退出码 / 耗时；
-6. `renderRun()` 渲染给模型看：`create` 时多两行**复用提示** —— `otherScripts()` 列出本会话其它脚本（最多 3 条、按最近运行排序、不带相似度打分），加一句 `to change it: edit that file, then ipy({path}) — don't send the code again`；
+6. `renderRun()` 渲染给模型看：`create` 时多两行**复用提示** —— `otherScripts()` 列出本会话其它脚本（最多 3 条、按最近运行排序、不带相似度打分），加一句 `to change it: edit that file, then ipy({path}) — don't send the code again`；实测这两行**不构成可测影响**（严格 edit 口径 n=25/组 8/25 vs 7/25，p=1.00），作用是交还路径，见 docs/memory/known-pitfalls.md；
 7. `structuredContent` 给 codemode 脚本用。
 
 **`ipy({path})`（重跑）** 跳过 2、3 的写入，直接校验文件存在再执行；不存在时**报错里点名两条恢复路径**（`ipy({list:true})` / 用 `code` 重写）。

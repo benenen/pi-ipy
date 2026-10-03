@@ -13,14 +13,15 @@
 # version of it ("keep the top 3 and add percentages") invited mental arithmetic on five
 # numbers already on screen, and one run answered without calling any tool at all while
 # claiming "脚本已更新" — a file it never touched. A median averages nothing away, so it
-# forces a re-read of the data and the verdict space collapses to the four real outcomes.
+# forces a re-read of the data. (It did not change the outcome — stale scripts were 3/25 in
+# both arms — the point is that a judge must not be answerable from memory.)
 #
-# One rep proves nothing: the same prompt on the same model lands on either side of every
-# one of these decisions (quantified by scripts/acc-rate.sh), and at n=11 per arm this
-# harness read 4/11 vs 2/11 on the strictest verdict while turn 1 — which the treatment
-# cannot touch — differed 19 vs 27 re-sent scripts. Read the numbers in
-# docs/memory/known-pitfalls.md before drawing a conclusion. Pin the model — the rate is
-# model-specific.
+# One rep proves nothing, and neither does n=11: at n=25 per arm this harness answered
+# 8/25 vs 7/25 on the strictest verdict (Fisher p=1.00), so the re-use lines in a `create`
+# result are a reminder that hands the path back, not a lever. The noise floor is what made
+# that hard to see: turn 1, which the lines cannot touch, differed 19 vs 27 re-sent scripts
+# between the same two arms. Read the numbers in docs/memory/known-pitfalls.md before
+# drawing a conclusion. Pin the model — the rate is model-specific.
 set -euo pipefail
 
 MODEL="${1:?usage: acc-reuse.sh <model> <reps> [extra pi flags...]}"
@@ -29,7 +30,13 @@ shift 2
 
 AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 SLUG="$(printf '%s%s' "$MODEL" "$*" | tr -c '[:alnum:]' '-')"
-OUT="/tmp/ipy-acc/reuse-$SLUG-$(date +%H%M%S)"
+# The two arms must not share a directory: PI_IPY_QUIET=1 is the control, and two arms started
+# in the same second used to compute the same $OUT and overwrite each other's rep*.json — a
+# silent way to measure nothing while both logs look healthy. Label the arm, and keep $$ so a
+# re-run cannot land in an existing directory either.
+if [ -n "${PI_IPY_QUIET:-}" ]; then ARM=quiet; else ARM=nudge; fi
+OUT="/tmp/ipy-acc/reuse-$SLUG-$ARM-$(date +%H%M%S)-$$"
+if [ -e "$OUT" ]; then echo "refusing to reuse $OUT" >&2; exit 1; fi
 mkdir -p "$OUT/sessions"
 cd /tmp/ipy-acc # neutral cwd: no repo AGENTS.md in the context
 

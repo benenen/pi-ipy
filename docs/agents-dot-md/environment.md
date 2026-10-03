@@ -56,15 +56,15 @@ cd /tmp/ipy-acc 2>/dev/null || { mkdir -p /tmp/ipy-acc && cd /tmp/ipy-acc; }
 bash scripts/acc-rate.sh opencode-go/deepseek-v4.1-flash 4                 # 处理组
 bash scripts/acc-rate.sh opencode-go/deepseek-v4.1-flash 4 -xt ipy         # 基线
 
-# 两轮：会不会 edit 旧脚本 + 按路径重跑，而不是重发代码？（n=3 起）
-bash scripts/acc-reuse.sh opencode-go/deepseek-v4.1-flash 3
-PI_IPY_QUIET=1 bash scripts/acc-reuse.sh opencode-go/deepseek-v4.1-flash 3  # 关掉复用提示的对照
+# 两轮：会不会 edit 旧脚本 + 按路径重跑，而不是重发代码？（要分开 ~32% 与 ~28% 这种差，n 得 25 起）
+bash scripts/acc-reuse.sh opencode-go/deepseek-v4.1-flash 25
+PI_IPY_QUIET=1 bash scripts/acc-reuse.sh opencode-go/deepseek-v4.1-flash 25  # 关掉复用提示的对照
 ```
 
 两个仪表都自己跑 pi、自己抽 `tool_execution_start` 事件、自己出结论，不再手写抽事件的脚本（旧写法见 git 历史）。它们报的是：
 
 - `acc-rate.sh`：每题里 `ipy` 是否出现、是否退化成 `bash` + `python3 - <<'EOF'`。
-- `acc-reuse.sh`：第 1 轮建脚本、第 2 轮提个小改动。判定分四类 —— `严格 edit+重跑`（最优）、`仅按路径重跑`、`重写`（又发一遍代码）、`bash+heredoc`／`没调工具`；并回读 `/tmp/pi-ipy-*/ipy-acc-*/.index.jsonl` 的 `mode` 序列交叉验证。
+- `acc-reuse.sh`：第 1 轮建脚本、第 2 轮提个小改动（**必须是模型心算不出来的改动**，否则它会跳过工具）。判定按严格度排：`严格 edit+重跑`（最优）→ `脚本变陈旧`（重跑了旧脚本但没改，或重跑旧脚本 + 另写 heredoc 干新活）→ `重写`（同名覆写）→ `bash+heredoc` → `没调工具`；并回读 `/tmp/pi-ipy-*/ipy-acc-*/.index.jsonl` 的 `mode` 序列交叉验证。输出目录名带臂标识（`nudge`/`quiet`）与 pid —— 同秒启动的两臂曾算出同一个目录名而互相覆盖 rep 文件，两边日志却都正常（详见 docs/memory/known-pitfalls.md）。
 
 提示词要挑「bash 单独干不了、Python 才顺手」的：一句话 `wc -l` 就能解决的任务两组都走 bash，测不出东西。`acc-rate.sh` 里的提示词要求把 `toolCall.name` 的调用次数和所在 assistant 消息的 `usage.totalTokens` 关联聚合 —— 关联两处嵌套字段，用 shell 硬拼很难受。
 
@@ -74,15 +74,17 @@ PI_IPY_QUIET=1 bash scripts/acc-reuse.sh opencode-go/deepseek-v4.1-flash 3  # �
 |---|---|---|
 | 模型会不会挑 ipy？ | `acc-rate.sh`，n=4 | 激活组 **ipy 3/4**，且 **0/4** 退化成 python heredoc |
 | 同上基线 | `acc-rate.sh ... -xt ipy`，n=4 | ipy 0/4（本就没这工具）；python heredoc 只 1/4，**3/4 用纯 shell 就做完了** |
-| 会不会 edit 旧脚本？ | `acc-reuse.sh`，n=11/组 | 有 nudge：严格 edit+重跑 **4/11**、edit 或仅重跑 5/11、重写 3、bash 1 |
-| 同上对照 | `PI_IPY_QUIET=1`，n=11 | 严格 **2/11**、edit 或仅重跑 5/11、重写 5、bash 1 |
+| 会不会 edit 旧脚本？ | `acc-reuse.sh`，n=25/组 | 有 nudge：严格 edit+重跑 **8/25**、重写（同名覆写）13/25、脚本变陈旧 3/25、bash+heredoc 1/25 |
+| 同上对照 | `PI_IPY_QUIET=1`，n=25 | 严格 **7/25**、重写 13/25、陈旧 3/25、heredoc 1/25、没调工具 1/25 |
+| 脚本文件最终是新的？ | 同上（严格 + 重写） | **21/25 vs 20/25**，Fisher 双侧 p=1.00 |
 
 读法：
 
-- guideline 确实把「要写程序时」的第一反应推向 ipy（3/4），但**基线那条提示词不够「python 必需」**（3/4 纯 shell 解决），所以这一列只能说明取舍、不能说明替代。
-- **复用那一行 nudge 没测出效果**：严格口径 4/11 vs 2/11 在 n=11 下分不开（重写 3 vs 5 也是），宽松口径（edit 或仅重跑）两边都是 5/11。
-- 最该记住的是**噪声地板有多高**：nudge 在第 1 轮的建脚本次数上一字影响不了——而两组第 1 轮发了 19 份 vs 27 份代码。处理组在它不影响的量上相差 40%，说明 n=11 时任何 ≤ 这个尺度的效应都测不出来。要定这件事需要 n≈25/组（FI 检验），或换个更干净的判据。
-- 真正的开销大头不在第 2 轮，而在**同一轮内的反复重发**：对照组有一例一轮发了 5 遍完整脚本；而处理组有一例 `1 create + 5 run`——同一个模型里这行为是做得到的。
+- guideline 确实把「要写程序时」的第一反应推向 ipy（本轮复用测量的第 1 轮是 16/17 与 15/15、heredoc 0/17 与 2/15），但**基线那条提示词不够「python 必需」**（3/4 纯 shell 解决），所以这一列只能说明取舍、不能说明替代。
+- **复用那两行 nudge 判定无效**：n=25/组、模型钉死、第 2 轮换成必须重新读文件才能算的中位数（旧提示词算百分比能心算，出现过一次一次工具不调、还回答「脚本已更新」），严格口径 **8/25 vs 7/25，Fisher p=1.00**；重写 13/25 vs 13/25、陈旧 3/25 vs 3/25、heredoc 1/25 vs 1/25 —— 两臂几乎逐格相同。换成更贴近用户感受的口径「脚本文件最终是否变新」也一样（21/25 vs 20/25，p=1.00）。早期 `percent` 变体（n=11/14）同向无差（4/11 vs 3/14，p=0.66）。→ **它只是把路径交还给模型，不是能推动 edit 的杠杆**；文档、计划、后续改动都不许再按「它能推动」来写。
+- **模型实际在用的是「同名重写」**（13/25；更早一批 27 个 session-turn 里 24/27 同名）：`saveScript` 视为覆写，所以文件最终是新的、目录也不攒重复文件——「重写」的代价只有重发 token。真正陈旧的脚本很少（3/25）。
+- 两条方法论比结论更值钱：① **噪声地板**——nudge 影响不到的第 1 轮，两组建脚本次数就差 19 vs 27（40%）；② **单跑与小 n 都会骗人**——同一模型、逐字节相同的系统提示，一次 4 跑用 ipy 3 次、另一次 5 轮 0 次；我曾凭 n=3 断言「中位数变体更容易让脚本陈旧」（2/3），n=25 后是 3/25 vs 3/25。
+- 真正的开销大头不在第 2 轮，而在**同一轮内的反复重发**：有一例一轮发了 5 遍完整脚本；另一例 `1 create + 5 run`。
 
 ## 五、发布
 
