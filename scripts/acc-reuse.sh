@@ -9,6 +9,12 @@
 # `ipy({code})` is a rewrite, and a python heredoc in bash is the baseline the tool exists
 # to displace.
 #
+# Turn 2 must ask for something that cannot be derived from what turn 1 printed: the first
+# version of it ("keep the top 3 and add percentages") invited mental arithmetic on five
+# numbers already on screen, and one run answered without calling any tool at all while
+# claiming "脚本已更新" — a file it never touched. A median averages nothing away, so it
+# forces a re-read of the data and the verdict space collapses to the four real outcomes.
+#
 # One rep proves nothing: the same prompt on the same model lands on either side of every
 # one of these decisions (quantified by scripts/acc-rate.sh), and at n=11 per arm this
 # harness read 4/11 vs 2/11 on the strictest verdict while turn 1 — which the treatment
@@ -31,7 +37,7 @@ cd /tmp/ipy-acc # neutral cwd: no repo AGENTS.md in the context
 # content holds `{type:"toolCall", name, arguments}` items. Aggregating one against the
 # other needs an actual parse — that is deliberate.
 TURN1="读 $AGENT_DIR/sessions 下最新的那个 .jsonl 会话文件：按 assistant 消息里 toolCall.name 汇总每个工具的调用次数，再算出每条带该工具调用的 assistant 消息的 usage.totalTokens 平均值，按平均值从高到低列出前 5 个工具及各自调用次数。"
-TURN2="改一下：只保留前 3 个，并在每行加上该工具调用次数占全部调用次数的百分比。"
+TURN2="改一下：把平均值换成中位数，仍然只保留前 3 个。"
 
 for i in $(seq 1 "$REPS"); do
 	sid="r$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')-reuse"
@@ -69,7 +75,7 @@ def run_script_path(path):
     return os.path.basename(hits[-1]) if hits else None
 
 
-reuse = rewrite = bash = 0
+reuse = stale = rewrite = bash = none = 0
 print(f"\nmodel: {model}   flags: {' '.join(sys.argv[4:]) or '(none)'}   reps: {reps}")
 for i in range(1, reps + 1):
     t1, t2 = f"{out}/rep{i}.turn1.json", f"{out}/rep{i}.turn2.json"
@@ -83,25 +89,36 @@ for i in range(1, reps + 1):
     ipy_code = [a for n, a in c2 if n == "ipy" and a.get("code")]
     heredoc2 = sum(1 for n, a in c2 if n == "bash" and "python3" in str(a.get("command", "")) and "<<" in str(a.get("command", "")))
     lines = [len(str(a.get("code", "")).splitlines()) for a in ipy_code]
+    # Re-sending code under the *same* name is how the file gets updated (ipy treats it as an
+    # overwrite), so it is not the same failure as scattering new names around: count both.
+    creates = [a.get("name") for n, a in c1 + c2 if n == "ipy" and a.get("code")]
+    names_note = "" if not creates else f"create×{len(creates)}/{len(set(creates))}名"
 
-    if ipy_code and not ipy_path:
+    # Strictest verdict first: an edit that landed *and* was re-run is the flow the design
+    # promises. Re-running the untouched script is not re-use — the change was never applied
+    # (usually the model did the new work in a heredoc instead), and that stale file is worse
+    # than a rewrite, which at least leaves the script current.
+    if edited and ipy_path:
+        verdict = "严格 edit + 重跑 ✓"
+        reuse += 1
+    elif ipy_path and heredoc2:
+        verdict = "重跑旧脚本 + heredoc 干新活（脚本仍陈旧）"
+        stale += 1
+    elif ipy_path:
+        verdict = "按路径重跑（没改脚本，脚本仍陈旧）"
+        stale += 1
+    elif ipy_code and not ipy_path:
         verdict = "重写（又发了一遍代码）"
         rewrite += 1
-    elif ipy_path and edited:
-        verdict = "编辑 + 重跑 ✓"
-        reuse += 1
-    elif ipy_path:
-        verdict = "按路径重跑（没改脚本）"
-        reuse += 1
-    elif edited:
-        verdict = "只改没跑"
-        reuse += 1
     elif heredoc2:
         verdict = "bash + python heredoc"
         bash += 1
+    elif edited:
+        verdict = "只改没跑"
+        none += 1
     else:
-        verdict = "无（纯 shell？）"
-        bash += 1
+        verdict = "没调工具（或纯 shell）"
+        none += 1
 
     t1_note = f"ipy×{len(made)}" if made else (f"heredoc×{heredoc1}" if heredoc1 else "无脚本")
     t2_note = []
@@ -113,7 +130,7 @@ for i in range(1, reps + 1):
         t2_note.append(f"ipy(code, {lines[0] if lines else 0} 行)")
     if heredoc2:
         t2_note.append("bash+heredoc")
-    print(f"  rep{i}  turn1={t1_note:<12} turn2={' + '.join(t2_note) or '—':<40} {verdict}")
+    print(f"  rep{i}  turn1={t1_note:<12} turn2={' + '.join(t2_note) or '—':<40} {names_note:<18} {verdict}")
 
     # Cross-check against the tool's own record of what happened in that session.
     dirs = glob.glob(f"/tmp/pi-ipy-*/ipy-acc-{open(f'{out}/rep{i}.sid').read().strip()[:8]}")
@@ -128,6 +145,6 @@ for i in range(1, reps + 1):
         if modes:
             print(f"        manifest: {modes}")
 
-print(f"\n  编辑+复用  {reuse}/{reps}\n  重写       {rewrite}/{reps}\n  bash       {bash}/{reps}")
+print(f"\n  严格 edit+重跑  {reuse}/{reps}\n  脚本变陈旧      {stale}/{reps}\n  重写（同名字） {rewrite}/{reps}\n  bash+heredoc    {bash}/{reps}\n  没调工具/其它  {none}/{reps}")
 PY
 echo "raw: $OUT"
