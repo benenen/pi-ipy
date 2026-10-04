@@ -144,75 +144,72 @@ export interface ScriptEdit {
 	newText: string;
 }
 
-/** Apply exact replacements as one transaction, restricted to this session's scripts. */
+/** Apply exact replacements to a session script; caller must hold its file mutation queue. */
 export async function editScript(dir: string, path: string, edits: ScriptEdit[]): Promise<SaveResult> {
 	const target = resolve(path);
 	if (dirname(target) !== resolve(dir) || !target.endsWith(".py")) {
 		throw new Error("ipy: edits require a .py file in this session; use ipy({list:true}) to find its path.");
 	}
-	return withFileMutationQueue(target, async () => {
-		const info = await lstat(target);
-		if (!info.isFile() || info.isSymbolicLink()) {
-			throw new Error("ipy: edits require a regular script file; use ipy({list:true}) to find one.");
+	const info = await lstat(target);
+	if (!info.isFile() || info.isSymbolicLink()) {
+		throw new Error("ipy: edits require a regular script file; use ipy({list:true}) to find one.");
+	}
+	const original = await readFile(target, "utf8");
+	const changes = edits.map((edit) => {
+		const at = original.indexOf(edit.oldText);
+		if (at < 0 || original.indexOf(edit.oldText, at + 1) >= 0) {
+			throw new Error("ipy: each oldText must occur exactly once; read the script and include more surrounding text.");
 		}
-		const original = await readFile(target, "utf8");
-		const changes = edits.map((edit) => {
-			const at = original.indexOf(edit.oldText);
-			if (at < 0 || original.indexOf(edit.oldText, at + 1) >= 0) {
-				throw new Error("ipy: each oldText must occur exactly once; read the script and include more surrounding text.");
-			}
-			return { at, end: at + edit.oldText.length, text: edit.newText };
-		}).sort((a, b) => a.at - b.at);
-		for (let i = 1; i < changes.length; i++) {
-			if (changes[i].at < changes[i - 1].end) {
-				throw new Error("ipy: edits overlap; combine overlapping changes into one replacement.");
-			}
+		return { at, end: at + edit.oldText.length, text: edit.newText };
+	}).sort((a, b) => a.at - b.at);
+	for (let i = 1; i < changes.length; i++) {
+		if (changes[i].at < changes[i - 1].end) {
+			throw new Error("ipy: edits overlap; combine overlapping changes into one replacement.");
 		}
-		let code = original;
-		for (const change of changes.reverse()) {
-			code = code.slice(0, change.at) + change.text + code.slice(change.end);
-		}
-		if (code === original) return { path: target, hash: sha256(code), reused: true };
-		const tmp = join(dir, `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
-		try {
-			await writeFile(tmp, code, { mode: FILE_MODE });
-			await rename(tmp, target);
-		} catch (error) {
-			await unlink(tmp).catch(() => undefined);
-			throw error;
-		}
-		return { path: target, hash: sha256(code), reused: false };
-	});
+	}
+	let code = original;
+	for (const change of changes.reverse()) {
+		code = code.slice(0, change.at) + change.text + code.slice(change.end);
+	}
+	if (code === original) return { path: target, hash: sha256(code), reused: true };
+	const tmp = join(dir, `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+	try {
+		await writeFile(tmp, code, { mode: FILE_MODE });
+		await rename(tmp, target);
+	} catch (error) {
+		await unlink(tmp).catch(() => undefined);
+		throw error;
+	}
+	return { path: target, hash: sha256(code), reused: false };
 }
 
 /**
  * Write a script. Same name + same content counts as reuse (file untouched);
  * same name + different content overwrites it — that is how a script gets "edited".
  * Writes are atomic (temp file + rename) and refuse to replace a symlink.
+ * Caller must hold the target file mutation queue through execution.
  */
 export async function saveScript(dir: string, name: string, code: string): Promise<SaveResult> {
 	const target = resolve(dir, sanitizeName(name));
 	assertInside(dir, target);
 	const hash = sha256(code);
-	return withFileMutationQueue(target, async () => {
-		const existingInfo = await lstat(target).catch(() => undefined);
-		if (existingInfo?.isSymbolicLink()) {
-			throw new Error(`ipy: ${target} is a symlink, refusing to overwrite it`);
-		}
-		const existing = existingInfo ? await readIfExists(target) : undefined;
-		if (existing !== undefined && sha256(existing) === hash) {
-			return { path: target, reused: true, hash };
-		}
-		const tmp = join(dir, `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
-		try {
-			await writeFile(tmp, code, { mode: FILE_MODE });
-			await rename(tmp, target);
-		} catch (error) {
-			await unlink(tmp).catch(() => undefined);
-			throw error;
-		}
-		return { path: target, reused: false, hash };
-	});
+	const existingInfo = await lstat(target).catch(() => undefined);
+	if (existingInfo?.isSymbolicLink()) {
+		throw new Error(`ipy: ${target} is a symlink, refusing to overwrite it`);
+	}
+	const existing = existingInfo ? await readIfExists(target) : undefined;
+	if (existing !== undefined && sha256(existing) === hash) {
+		return { path: target, reused: true, hash };
+	}
+	const tmp = join(dir, `.tmp-${process.pid}-${randomBytes(6).toString("hex")}`);
+	try {
+		await writeFile(tmp, code, { mode: FILE_MODE });
+		await rename(tmp, target);
+	} catch (error) {
+		await unlink(tmp).catch(() => undefined);
+		throw error;
+	}
+	return { path: target, reused: false, hash };
 }
 
 /** Append one manifest entry. O_APPEND write, so parallel writers cannot interleave a short line. */
@@ -226,6 +223,19 @@ export async function appendManifest(dir: string, entry: ManifestEntry): Promise
 	}
 }
 
+function isManifestEntry(value: unknown): value is ManifestEntry {
+	if (typeof value !== "object" || value === null) return false;
+	return "ts" in value && typeof value.ts === "string"
+		&& "name" in value && typeof value.name === "string"
+		&& "path" in value && typeof value.path === "string"
+		&& "hash" in value && typeof value.hash === "string"
+		&& (!("purpose" in value) || typeof value.purpose === "string")
+		&& "mode" in value && (value.mode === "create" || value.mode === "run" || value.mode === "edit")
+		&& "reused" in value && typeof value.reused === "boolean"
+		&& "exitCode" in value && typeof value.exitCode === "number" && Number.isFinite(value.exitCode)
+		&& "wallTimeSeconds" in value && typeof value.wallTimeSeconds === "number" && Number.isFinite(value.wallTimeSeconds);
+}
+
 /** Read the whole manifest; a corrupt line is skipped instead of failing the call. */
 export async function readManifest(dir: string): Promise<ManifestEntry[]> {
 	const raw = await readIfExists(join(dir, ".index.jsonl"));
@@ -233,11 +243,14 @@ export async function readManifest(dir: string): Promise<ManifestEntry[]> {
 	const entries: ManifestEntry[] = [];
 	for (const line of raw.split("\n")) {
 		if (!line.trim()) continue;
+		let entry: unknown;
 		try {
-			entries.push(JSON.parse(line) as ManifestEntry);
+			entry = JSON.parse(line);
 		} catch {
 			// Half-written line (process killed mid-write); ignore it.
+			continue;
 		}
+		if (isManifestEntry(entry)) entries.push(entry);
 	}
 	return entries;
 }
@@ -251,7 +264,7 @@ export async function listScripts(dir: string): Promise<ScriptInfo[]> {
 		if (!entry.isFile() || !entry.name.endsWith(".py")) continue;
 		const path = join(dir, entry.name);
 		const info = await lstat(path);
-		const runs = manifest.filter((item) => item.name === entry.name);
+		const runs = manifest.filter((item) => item.path === path);
 		const last = runs.at(-1);
 		infos.push({
 			name: entry.name,

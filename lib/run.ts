@@ -49,6 +49,7 @@ class CappedText {
 	private readonly tail: string[] = [];
 	private headBytes = 0;
 	private tailBytes = 0;
+	private headComplete = false;
 	/** Total bytes received, retained or not. */
 	private receivedBytes = 0;
 
@@ -68,7 +69,7 @@ class CappedText {
 
 	private emitText(text: string): void {
 		if (!text) return;
-		if (this.headBytes >= HALF_CAP) {
+		if (this.headComplete || this.headBytes >= HALF_CAP) {
 			this.pushTail(text);
 			return;
 		}
@@ -82,6 +83,8 @@ class CappedText {
 		const { kept, rest } = splitByBytes(text, room);
 		this.head.push(kept);
 		this.headBytes += Buffer.byteLength(kept, "utf8");
+		// Once a code point goes to the tail, later text must stay there too.
+		this.headComplete = true;
 		if (rest) this.pushTail(rest);
 	}
 

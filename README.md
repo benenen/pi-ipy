@@ -109,6 +109,10 @@ is how the arms of `scripts/acc-reuse.sh` are defined.
   `$PI_IPY_QUIET` turns off the two re-use lines in the result (for A/B measurement).
 - The child runs detached in its own process group, and abort/timeout kills the **whole
   group** — a script that spawned something else does not outlive it.
+- Calls targeting the same script hold pi's file mutation queue through execution
+  and recording the result. Different scripts can still run in parallel.
+- Timeout is rounded up to at least 1 ms. Values above 2,147,483.647 seconds are
+  rejected because they exceed Node's timer limit; omit it for no limit.
 - Results also come back as `structuredContent` (`exit_code`, `stdout`, `stderr`,
   `script_path`, `reused`, `wall_time_seconds`, `timed_out`, `aborted`, `output_path`),
   so [codemode](docs/agents-dot-md/architecture.md) scripts can drive ipy directly —

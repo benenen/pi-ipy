@@ -26,6 +26,7 @@ import {
 	formatSize,
 	truncateHead,
 	truncateTail,
+	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { type RunResult, runPython } from "./lib/run.ts";
@@ -36,6 +37,7 @@ import {
 	listScripts,
 	saveFullOutput,
 	saveScript,
+	sanitizeName,
 	type ScriptInfo,
 	type ScriptEdit,
 	sessionDir,
@@ -43,6 +45,8 @@ import {
 
 /** How much of each stream script callers (codemode) receive. */
 const CODEMODE_MAX_BYTES = 1024 * 1024;
+/** Node timers accept at most a signed 32-bit millisecond delay. */
+const MAX_TIMEOUT_SECONDS = 2_147_483_647 / 1000;
 
 const pythonPath = (): string => process.env.PI_IPY_PYTHON?.trim() || "python3";
 
@@ -145,7 +149,10 @@ function parseInput(params: IpyInput): Mode {
 	if (params.timeout !== undefined && !(Number.isFinite(params.timeout) && params.timeout > 0)) {
 		throw new Error("ipy: `timeout` must be a positive number of seconds.");
 	}
-	const timeoutMs = params.timeout === undefined ? undefined : Math.round(params.timeout * 1000);
+	if (params.timeout !== undefined && params.timeout > MAX_TIMEOUT_SECONDS) {
+		throw new Error(`ipy: timeout exceeds ${MAX_TIMEOUT_SECONDS} seconds; reduce it or omit timeout for no limit.`);
+	}
+	const timeoutMs = params.timeout === undefined ? undefined : Math.max(1, Math.ceil(params.timeout * 1000));
 
 	if (code) {
 		return { kind: "create", code, name: params.name, purpose: params.purpose, args, timeoutMs };
@@ -286,105 +293,107 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			let scriptPath: string;
-			let hash: string;
-			let state: string;
-			let reused = false;
-			let alsoInSession: string[] = [];
+			const scriptName = mode.kind === "create" ? mode.name ?? fallbackName(mode.purpose) : "";
+			const scriptPath = mode.kind === "create" ? resolve(dir, sanitizeName(scriptName)) : resolve(ctx.cwd, mode.path);
+			// Hold the same queue as host edits/writes until this version has finished running.
+			return withFileMutationQueue(scriptPath, async () => {
+				let hash: string;
+				let state: string;
+				let reused = false;
+				let alsoInSession: string[] = [];
 
-			if (mode.kind === "create") {
-				const saved = await saveScript(dir, mode.name ?? fallbackName(mode.purpose), mode.code);
-				scriptPath = saved.path;
-				hash = saved.hash;
-				reused = saved.reused;
-				state = reused ? "already on disk, unchanged" : "written";
-				alsoInSession = await otherScripts(dir, scriptPath);
-			} else {
-				scriptPath = resolve(ctx.cwd, mode.path);
-				const info = await lstat(scriptPath).catch(() => undefined);
-				if (!info?.isFile()) {
-					throw new Error(
-						`ipy: no script at ${scriptPath}. Temp scripts are cleared on reboot — ` +
-							"call ipy({list:true}) to see what exists in this session, or write it again with ipy({code}).",
-					);
-				}
-				if (mode.edits) {
-					const saved = await editScript(dir, scriptPath, mode.edits);
+				if (mode.kind === "create") {
+					const saved = await saveScript(dir, scriptName, mode.code);
 					hash = saved.hash;
 					reused = saved.reused;
-					state = "edited and run";
+					state = reused ? "already on disk, unchanged" : "written";
+					alsoInSession = await otherScripts(dir, scriptPath);
 				} else {
-					hash = await hashFile(scriptPath);
-					state = "existing script";
+					const info = await lstat(scriptPath).catch(() => undefined);
+					if (!info?.isFile()) {
+						throw new Error(
+							`ipy: no script at ${scriptPath}. Temp scripts are cleared on reboot — ` +
+								"call ipy({list:true}) to see what exists in this session, or write it again with ipy({code}).",
+						);
+					}
+					if (mode.edits) {
+						const saved = await editScript(dir, scriptPath, mode.edits);
+						hash = saved.hash;
+						reused = saved.reused;
+						state = "edited and run";
+					} else {
+						hash = await hashFile(scriptPath);
+						state = "existing script";
+					}
 				}
-			}
-			const runMode = mode.kind === "run" && mode.edits ? "edit" : mode.kind;
+				const runMode = mode.kind === "run" && mode.edits ? "edit" : mode.kind;
 
-			const result = await runPython({
-				pythonPath: pythonPath(),
-				scriptPath,
-				args: mode.args,
-				cwd: ctx.cwd,
-				timeoutMs: mode.timeoutMs,
-				signal,
-			});
-
-			await appendManifest(dir, {
-				ts: new Date().toISOString(),
-				name: scriptPath.split("/").pop() ?? scriptPath,
-				path: scriptPath,
-				hash,
-				purpose: mode.kind === "create" ? mode.purpose : undefined,
-				mode: runMode,
-				reused,
-				exitCode: result.exitCode,
-				wallTimeSeconds: result.wallTimeSeconds,
-			});
-
-			const stdout = result.stdout.replace(/\n+$/, "");
-			const stderr = result.stderr.replace(/\n+$/, "");
-			const combined = [stdout ? `--- stdout ---\n${stdout}` : "", stderr ? `--- stderr ---\n${stderr}` : ""].filter(Boolean).join("\n");
-			const view = truncateTail(combined, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-
-			let fullOutputPath: string | undefined;
-			if (view.truncated) {
-				fullOutputPath = await saveFullOutput(dir, scriptPath, combined);
-			}
-
-			const text = renderRun({
-				scriptPath,
-				state,
-				result,
-				outputView: view.content,
-				timeoutSeconds: mode.timeoutMs === undefined ? undefined : mode.timeoutMs / 1000,
-				fullOutputPath,
-				alsoInSession,
-				suggestEdit: mode.kind === "create" && !process.env.PI_IPY_QUIET,
-			});
-
-			return {
-				content: [{ type: "text", text }],
-				details: {
-					mode: runMode,
+				const result = await runPython({
+					pythonPath: pythonPath(),
 					scriptPath,
+					args: mode.args,
+					cwd: ctx.cwd,
+					timeoutMs: mode.timeoutMs,
+					signal,
+				});
+
+				await appendManifest(dir, {
+					ts: new Date().toISOString(),
+					name: scriptPath.split("/").pop() ?? scriptPath,
+					path: scriptPath,
+					hash,
+					purpose: mode.kind === "create" ? mode.purpose : undefined,
+					mode: runMode,
 					reused,
 					exitCode: result.exitCode,
 					wallTimeSeconds: result.wallTimeSeconds,
-					timedOut: result.timedOut,
-				} satisfies IpyDetails,
-				isError: result.exitCode !== 0,
-				structuredContent: {
-					exit_code: result.exitCode,
-					stdout: truncateHead(result.stdout, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
-					stderr: truncateHead(result.stderr, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
-					script_path: scriptPath,
-					reused,
-					wall_time_seconds: result.wallTimeSeconds,
-					...(fullOutputPath ? { output_path: fullOutputPath } : {}),
-					timed_out: result.timedOut,
-					aborted: result.aborted,
-				},
-			};
+				});
+
+				const stdout = result.stdout.replace(/\n+$/, "");
+				const stderr = result.stderr.replace(/\n+$/, "");
+				const combined = [stdout ? `--- stdout ---\n${stdout}` : "", stderr ? `--- stderr ---\n${stderr}` : ""].filter(Boolean).join("\n");
+				const view = truncateTail(combined, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+
+				let fullOutputPath: string | undefined;
+				if (view.truncated) {
+					fullOutputPath = await saveFullOutput(dir, scriptPath, combined);
+				}
+
+				const text = renderRun({
+					scriptPath,
+					state,
+					result,
+					outputView: view.content,
+					timeoutSeconds: mode.timeoutMs === undefined ? undefined : mode.timeoutMs / 1000,
+					fullOutputPath,
+					alsoInSession,
+					suggestEdit: mode.kind === "create" && !process.env.PI_IPY_QUIET,
+				});
+
+				return {
+					content: [{ type: "text", text }],
+					details: {
+						mode: runMode,
+						scriptPath,
+						reused,
+						exitCode: result.exitCode,
+						wallTimeSeconds: result.wallTimeSeconds,
+						timedOut: result.timedOut,
+					} satisfies IpyDetails,
+					isError: result.exitCode !== 0,
+					structuredContent: {
+						exit_code: result.exitCode,
+						stdout: truncateHead(result.stdout, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
+						stderr: truncateHead(result.stderr, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
+						script_path: scriptPath,
+						reused,
+						wall_time_seconds: result.wallTimeSeconds,
+						...(fullOutputPath ? { output_path: fullOutputPath } : {}),
+						timed_out: result.timedOut,
+						aborted: result.aborted,
+					},
+				};
+			});
 		},
 	});
 }

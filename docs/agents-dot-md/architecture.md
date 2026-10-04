@@ -44,9 +44,15 @@
 
 **`ipy({path, edits})`（修改并重跑）**：只允许修改当前 session 目录内的普通 `.py` 文件；在宿主 `withFileMutationQueue` 中读取原文件，逐条验证 `oldText` 在原文件中恰好出现一次、替换范围互不重叠，再临时文件 + rename 一次落盘。任意验证失败则不写、不运行。修改完成后走同一执行链路，manifest 的 mode 为 `edit`。输入/选项变化优先使用已有 `args`，代码逻辑变化再用 `edits`。
 
+**并发边界**：`index.ts` 对创建或运行的目标路径取得宿主 `withFileMutationQueue`，覆盖保存 / 修改、Python 执行与 manifest 记录；`saveScript()` / `editScript()` 由持有该队列的调用方执行，不再嵌套取得同一队列。同路径调用和宿主 edit/write 串行，不同路径仍可并行。队列只协调同一宿主进程内的操作，外部进程直接写文件不受它约束。
+
+**超时边界**：秒数必须为有限正数，转换时向上取整且至少 1ms；超过 Node 定时器的 2,147,483,647ms 上限时拒绝并提示减小 timeout 或省略以使用无限时运行。
+
 **输出预算**：stdout/stderr 连同分节标签共用 `truncateTail` 的 2000 行 / 50 KiB 预算，`renderRun` 只能接收截断后的 `outputView`；原捕获内容保存在 `output_path`。两个流各有 4 MiB 内存捕获上限，超过该上限时保存文件也含中间省略标记，不能把它当作无限量的完整原始日志。
 
 **`ipy({list:true})`** 以磁盘上的 `*.py` 为准（manifest 只用来补运行次数和最近退出码），所以模型手写一个文件进去也能被列出来。
+
+manifest 行在 JSON 解析后还要验证必需字段与类型，坏行跳过；运行统计按完整脚本路径关联，外部同名文件的记录不会归到本会话脚本。
 
 ## 四、存储与安全边界
 

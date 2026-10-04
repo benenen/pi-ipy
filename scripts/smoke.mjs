@@ -88,6 +88,26 @@ const third = await call({ code: "print('changed')", name: "hello" });
 check("changed content overwrites", third.structuredContent.reused === false);
 check("file holds the new code", (await readFile(third.structuredContent.script_path, "utf8")).includes("changed"));
 
+console.log("concurrent execution");
+const concurrent = await Promise.all([
+	call({ name: "concurrent", code: "print('FIRST')" }),
+	call({ name: "concurrent", code: "print('SECOND')" }),
+]);
+check("same-name concurrent calls run their own code", concurrent[0].structuredContent.stdout.trim() === "FIRST" && concurrent[1].structuredContent.stdout.trim() === "SECOND");
+const independent = await Promise.all(["a", "b"].map((side) => call({
+	name: `parallel_${side}`,
+	code: [
+		"import pathlib,time",
+		`pathlib.Path('ready_${side}').touch()`,
+		"deadline = time.monotonic() + 3",
+		`while not pathlib.Path('ready_${side === "a" ? "b" : "a"}').exists():`,
+		"    if time.monotonic() >= deadline: raise RuntimeError('other script did not start')",
+		"    time.sleep(0.01)",
+		"print('parallel')",
+	].join("\n"),
+})));
+check("different scripts still run in parallel", independent.every((result) => result.structuredContent.exit_code === 0 && result.structuredContent.stdout.trim() === "parallel"));
+
 console.log("run by path / argv");
 const rerun = await call({ path: third.structuredContent.script_path });
 check("re-run by path", rerun.structuredContent.stdout.includes("changed"));
@@ -241,11 +261,18 @@ check("rerun preserves the earlier output", (await readFile(big.structuredConten
 const wide = await call({ name: "wide", code: "import sys\nprint('字' * 30000)\nsys.stderr.write('尾' * 30000 + 'ERROR_SENTINEL')" });
 check("combined stdout/stderr has one byte budget", Buffer.byteLength(wide.content[0].text) < 50 * 1024 + 1024);
 check("truncated Unicode stays valid and keeps stderr tail", !wide.content[0].text.includes("\ufffd") && wide.content[0].text.includes("ERROR_SENTINEL"));
+const boundary = await call({ name: "unicode_boundary", code: "import sys,time\nsys.stdout.write('字' * 699051)\nsys.stdout.flush()\ntime.sleep(0.1)\nsys.stdout.write('AB')" });
+check("capture preserves ordering across the Unicode head boundary", (await readFile(boundary.structuredContent.output_path, "utf8")) === "--- stdout ---\n" + "字".repeat(699051) + "AB");
 
 console.log("timeout / abort / process group");
 const slow = await call({ code: "import time\ntime.sleep(30)", name: "slow", timeout: 1 });
 check("timeout flagged", slow.structuredContent.timed_out === true);
 check("timeout killed quickly", slow.structuredContent.wall_time_seconds < 10, `${slow.structuredContent.wall_time_seconds}s`);
+const tinyTimeout = await call({ name: "tiny_timeout", code: "import time\ntime.sleep(0.15)\nprint('done')", timeout: 0.0001 });
+check("sub-millisecond timeout remains enabled", tinyTimeout.structuredContent.timed_out && !tinyTimeout.structuredContent.stdout.includes("done"));
+let overflowError;
+try { await call({ name: "overflow_timeout", code: "print('done')", timeout: 2147484 }); } catch (error) { overflowError = error; }
+check("overflowing timeout is rejected with a recovery action", overflowError?.message.startsWith("ipy:") && overflowError.message.includes("omit"));
 
 const controller = new AbortController();
 const abortTimer = setTimeout(() => controller.abort(), 500);
@@ -295,6 +322,24 @@ const listing = await call({ list: true });
 check("list shows written scripts", listing.content[0].text.includes("hello.py") && listing.content[0].text.includes("argv.py"));
 check("list shows the purpose", listing.content[0].text.includes("smoke greeting"));
 check("list shows run counts", /1 run\(s\)|2 run\(s\)|3 run\(s\)/.test(listing.content[0].text));
+
+await call({ name: "shared_name", code: "print('session')" });
+const externalStats = join(workdir, "shared_name.py");
+await writeFile(externalStats, "import sys\nsys.exit(7)");
+await call({ path: externalStats });
+const stats = await call({ list: true });
+const statsLine = stats.content[0].text.split("\n").find((line) => line.startsWith("shared_name.py"));
+check("external same-name run does not change session stats", statsLine?.includes("1 run(s)  exit 0"), statsLine);
+const manifestPath = join(sessionDir, ".index.jsonl");
+const originalManifest = await readFile(manifestPath, "utf8");
+const validEntry = originalManifest.trim().split("\n").map((line) => JSON.parse(line)).find((entry) => entry.path === join(sessionDir, "shared_name.py"));
+const invalidEntries = [null, {}, [], 1, { ...validEntry, path: null }, { ...validEntry, purpose: 123 }, { ...validEntry, mode: "invalid" }];
+await writeFile(manifestPath, originalManifest + invalidEntries.map((entry) => JSON.stringify(entry)).join("\n") + "\n{broken\n");
+let recoveredList;
+let manifestError;
+try { recoveredList = await call({ list: true }); } catch (error) { manifestError = error; }
+check("invalid manifest entries are skipped while valid stats survive", !manifestError && recoveredList.content[0].text === stats.content[0].text, manifestError?.message);
+await writeFile(manifestPath, originalManifest);
 
 await rm(sessionDir, { recursive: true, force: true });
 await rm(workdir, { recursive: true, force: true });

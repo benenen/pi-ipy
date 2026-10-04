@@ -2,6 +2,12 @@
 
 > ipy 实现与「模型会不会真用」相关的实测记录；动手改工具面或提示文案前先扫一遍。
 
+- **2026-10-04｜同名并发调用需要把队列覆盖到执行与记账（已修复）**：同一 session 并发提交 FIRST / SECOND，同名文件两次运行都输出 SECOND；原队列只覆盖 saveScript() 的写入。→ index.ts 对目标路径持有宿主 withFileMutationQueue 直到运行与记账结束，saveScript()/editScript() 不再嵌套取同一锁；smoke 验证同名各自输出正确、不同脚本仍并行。此队列不覆盖外部进程直接写文件（index.ts、lib/store.ts）。
+- **2026-10-04｜Unicode 捕获进入 tail 后禁止再回填 head（已修复）**：先写并 flush 699051 个「字」，等待 0.1s 再写 AB，原保存输出末尾为「字AB字」，应为「字字AB」。→ CappedText 增加 headComplete 状态，剩余字节容不下完整字符时永久转向 tail；smoke 比对保存文件的完整文本，确认无需省略的输出逐字符正确（lib/run.ts、scripts/smoke.mjs）。
+- **2026-10-04｜timeout 转为毫秒后要处理零值与溢出（已修复）**：timeout=0.0001 原先被四舍五入为 0ms 后禁用；timeout=2147484 溢出 Node 的 32 位定时器上限后被缩为 1ms。→ 秒转毫秒向上取整且至少 1ms，超过 2147483.647 秒时明确拒绝并提示减小或省略；smoke 分别验证小值确实超时、大值在执行前被拒绝（index.ts、scripts/smoke.mjs）。
+- **2026-10-04｜运行统计必须按完整脚本路径关联（已修复）**：本会话 shared_name.py 成功跑一次，path 运行会话外同名文件并 exit(7) 后，原 list 显示本会话脚本 2 run(s)、exit 7。→ listScripts() 改按 manifest.path 关联；smoke 验证此时本会话仍显示 1 run(s)、exit 0（lib/store.ts、scripts/smoke.mjs）。
+- **2026-10-04｜manifest 可解析不等于条目有效（已修复）**：.index.jsonl 中一行 null 会让 list 报 Cannot read properties of null (reading name)，原实现只跳过 JSON 语法错误。→ readManifest() 将解析结果作为 unknown，经类型守卫验证必需字段和可选 purpose；smoke 混入 null、空对象、数组、字段类型错误、非法 mode 和坏 JSON，确认有效记录与统计保持不变（lib/store.ts、scripts/smoke.mjs）。
+
 - **2026-10-04｜进程组清理不能只看主进程 close（已修复）**：Python 主进程超时退出后，stdout/stderr 指向 DEVNULL、忽略 SIGTERM 的子进程仍存活；原因是 settle() 提前清除强杀定时器。→ 终止后的 settle() 在清定时器前对剩余进程组发 SIGKILL；重复终止不创建第二个定时器。smoke 分别覆盖 timeout 与 abort，并确认子进程先安装忽略 TERM 的处理器，随后没有写出延迟文件（lib/run.ts、scripts/smoke.mjs，83/83 项通过）。
 - **2026-10-04｜中文用途和无用途的默认名不能只用秒级时间（已修复）**：不同中文用途在同一秒退回相同脚本名，第二次创建覆盖第一次。→ fallbackName() 对没有可用 ASCII slug 的非空用途生成稳定 SHA-256 前缀，无用途时使用时间加随机后缀；smoke 固定时间验证不同用途不覆盖、相同用途可复用、无用途创建不撞名（index.ts、scripts/smoke.mjs）。
 - **2026-10-04｜截断输出必须按运行独立保存（已修复）**：同名脚本第二次运行覆盖固定 .out/<脚本名>.out，导致第一次返回的 output_path 读到第二次内容。→ saveFullOutput() 给每次输出加随机后缀，并用 wx 独占创建；smoke 检查两次路径不同且第一次文件内容保持不变（lib/store.ts、scripts/smoke.mjs）。
