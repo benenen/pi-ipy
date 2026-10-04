@@ -2,6 +2,12 @@
 
 > ipy 实现与「模型会不会真用」相关的实测记录；动手改工具面或提示文案前先扫一遍。
 
+- **2026-10-04｜参照 Claude Code 应分别比较 Python stdin 与文件执行**：本机 Claude Code 2.1.287 的近期 25 个主会话日志中，含 Python 关键词的 Bash 调用有 1020 条，其中 587 条匹配 Python heredoc；这是本机样本，不代表所有模型。官方 Bash 工具说明每条命令在独立进程中运行，并支持输出文件和后台任务（https://code.claude.com/docs/en/tools-reference）。→ 对照基线应包含 python3 - 与 python3 script.py，不能由「都能跑 Python」推断导入路径、输出保存和任务生命周期相同。
+- **2026-10-04｜scratchpad 落盘执行需要补上项目导入路径（已修复）**：清空测试进程 PYTHONPATH，cwd 的 ipy_local_fixture.py 经 python3 - 可导入、原 ipy(code) 报 ModuleNotFoundError。→ 本会话目录内脚本执行时在继承 PYTHONPATH 前加入 cwd，创建和 rerun 均可导入；外部 path 保留普通文件语义。smoke 验证项目值 42、外部同名模块值 99（index.ts、lib/run.ts、https://docs.python.org/3/library/sys_path_init.html）。
+- **2026-10-04｜空白校验不能修改 Python 源码（已修复）**：四空格起头的 print 经 python3 - 报 IndentationError、原 ipy 却成功；源文件也与输入不同。→ parseInput() 仅用 trim() 判断空白，保存原输入；smoke 同时检查首尾空行逐字保留和错误缩进交给 Python 报错（index.ts、scripts/smoke.mjs）。
+- **2026-10-04｜等待文件队列时取消必须同时跳过后续写入（已修复）**：同名首调用运行时，第二个 create 排队取消后仍覆盖源文件。→ withCancellableFileQueue() 等待期间响应 abort 并拒绝，取得队列后再次 throwIfAborted()；运行阶段仍由 runPython() 处理。smoke 持有宿主队列，检查排队 create/edit 在释放前返回取消，释放后源文件不变，并验证已取消的新调用不创建文件（index.ts、scripts/smoke.mjs）。
+- **2026-10-04｜完整输出应流式落盘，内存截断只用于视图（输出已修复，后台任务仍未实现）**：原 6MiB stdout 的保存文件只有约 4MiB，中间数据不可恢复。→ createOutputCapture() 建立两个临时文件，runPython() pipe 写入并等待完成，再按分节流式合成 output_path；smoke 追回完整 6MiB stdout + 5MiB stderr、检查模型字节预算，并用 /dev/full 的 ENOSPC 验证失败会停止脚本和保留 cause，临时文件均清理。每次保留文件占用随输出大小增长的磁盘空间；默认无限等待与后台生命周期尚未改变（lib/store.ts、lib/run.ts、scripts/smoke.mjs；参照 https://code.claude.com/docs/en/tools-reference#timeout-and-output-limits）。
+
 - **2026-10-04｜同名并发调用需要把队列覆盖到执行与记账（已修复）**：同一 session 并发提交 FIRST / SECOND，同名文件两次运行都输出 SECOND；原队列只覆盖 saveScript() 的写入。→ index.ts 对目标路径持有宿主 withFileMutationQueue 直到运行与记账结束，saveScript()/editScript() 不再嵌套取同一锁；smoke 验证同名各自输出正确、不同脚本仍并行。此队列不覆盖外部进程直接写文件（index.ts、lib/store.ts）。
 - **2026-10-04｜Unicode 捕获进入 tail 后禁止再回填 head（已修复）**：先写并 flush 699051 个「字」，等待 0.1s 再写 AB，原保存输出末尾为「字AB字」，应为「字字AB」。→ CappedText 增加 headComplete 状态，剩余字节容不下完整字符时永久转向 tail；smoke 比对保存文件的完整文本，确认无需省略的输出逐字符正确（lib/run.ts、scripts/smoke.mjs）。
 - **2026-10-04｜timeout 转为毫秒后要处理零值与溢出（已修复）**：timeout=0.0001 原先被四舍五入为 0ms 后禁用；timeout=2147484 溢出 Node 的 32 位定时器上限后被缩为 1ms。→ 秒转毫秒向上取整且至少 1ms，超过 2147483.647 秒时明确拒绝并提示减小或省略；smoke 分别验证小值确实超时、大值在执行前被拒绝（index.ts、scripts/smoke.mjs）。

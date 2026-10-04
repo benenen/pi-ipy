@@ -46,9 +46,13 @@
 
 **并发边界**：`index.ts` 对创建或运行的目标路径取得宿主 `withFileMutationQueue`，覆盖保存 / 修改、Python 执行与 manifest 记录；`saveScript()` / `editScript()` 由持有该队列的调用方执行，不再嵌套取得同一队列。同路径调用和宿主 edit/write 串行，不同路径仍可并行。队列只协调同一宿主进程内的操作，外部进程直接写文件不受它约束。
 
+**取消边界**：调用开始时检查 AbortSignal；等待队列期间可立即拒绝，队列回调取得执行权后再次检查，跳过已取消的保存 / 修改。队列回调开始后由 runPython() 处理运行中的取消，捕获文件在 finally 中关闭与清理。
+
+**Python 执行语义**：code 仅用 trim() 判断是否空白，保存原始源码；位于本会话目录的 scratchpad 在继承的 PYTHONPATH 前加入 cwd，创建和按路径重跑都能导入项目模块。外部 path 脚本保持普通文件执行的导入路径。每次执行仍是独立 Python 进程。
+
 **超时边界**：秒数必须为有限正数，转换时向上取整且至少 1ms；超过 Node 定时器的 2,147,483,647ms 上限时拒绝并提示减小 timeout 或省略以使用无限时运行。
 
-**输出预算**：stdout/stderr 连同分节标签共用 `truncateTail` 的 2000 行 / 50 KiB 预算，`renderRun` 只能接收截断后的 `outputView`；原捕获内容保存在 `output_path`。两个流各有 4 MiB 内存捕获上限，超过该上限时保存文件也含中间省略标记，不能把它当作无限量的完整原始日志。
+**输出预算**：stdout/stderr 连同分节标签共用 `truncateTail` 的 2000 行 / 50 KiB 预算，`renderRun` 只能接收截断后的 `outputView`。`store.createOutputCapture()` 预先打开两个独占、0600 的临时流文件，runPython() 通过 pipe 背压写入并等待文件完成；内存仍各保留最多 4 MiB 的头尾片段。视图或内存捕获截断时，按 stdout/stderr 两个分节流式合成完整 output_path，保留原输出换行；内存省略标记不会写入该文件。结束后删除临时流文件，保留的输出文件占用随输出规模增加的磁盘空间。写入失败会杀进程组并报告带 cause 的错误。
 
 **`ipy({list:true})`** 以磁盘上的 `*.py` 为准（manifest 只用来补运行次数和最近退出码），所以模型手写一个文件进去也能被列出来。
 

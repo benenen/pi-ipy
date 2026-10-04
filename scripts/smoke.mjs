@@ -14,7 +14,8 @@
  * and the neighbour reminder a `create` adds for re-use.
  */
 
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -88,6 +89,32 @@ const third = await call({ code: "print('changed')", name: "hello" });
 check("changed content overwrites", third.structuredContent.reused === false);
 check("file holds the new code", (await readFile(third.structuredContent.script_path, "utf8")).includes("changed"));
 
+console.log("source fidelity / project imports");
+const rawSource = "\n\nprint('raw source')\n\n";
+const rawScript = await call({ name: "raw_source", code: rawSource });
+check("source is saved without trimming", (await readFile(rawScript.structuredContent.script_path, "utf8")) === rawSource);
+const indentation = await call({ name: "indentation", code: "    print('invalid indentation')\n" });
+check("invalid leading indentation reaches Python unchanged", indentation.structuredContent.exit_code !== 0 && indentation.structuredContent.stderr.includes("IndentationError"));
+await writeFile(join(workdir, "ipy_local_fixture.py"), "VALUE = 42\n");
+const previousPythonPath = process.env.PYTHONPATH;
+process.env.PYTHONPATH = "";
+try {
+	const localImport = await call({ name: "local_import", code: "import ipy_local_fixture\nprint(ipy_local_fixture.VALUE)" });
+	check("scratchpad imports modules from cwd", localImport.structuredContent.stdout.trim() === "42", localImport.structuredContent.stderr);
+	const localRerun = await call({ path: localImport.structuredContent.script_path });
+	check("scratchpad rerun keeps cwd imports", localRerun.structuredContent.stdout.trim() === "42", localRerun.structuredContent.stderr);
+	const externalDir = join(workdir, "external");
+	await mkdir(externalDir);
+	await writeFile(join(externalDir, "ipy_local_fixture.py"), "VALUE = 99\n");
+	const externalPath = join(externalDir, "entry.py");
+	await writeFile(externalPath, "import ipy_local_fixture\nprint(ipy_local_fixture.VALUE)\n");
+	const externalRun = await call({ path: externalPath });
+	check("external scripts retain their own import directory", externalRun.structuredContent.stdout.trim() === "99");
+} finally {
+	if (previousPythonPath === undefined) delete process.env.PYTHONPATH;
+	else process.env.PYTHONPATH = previousPythonPath;
+}
+
 console.log("concurrent execution");
 const concurrent = await Promise.all([
 	call({ name: "concurrent", code: "print('FIRST')" }),
@@ -107,6 +134,34 @@ const independent = await Promise.all(["a", "b"].map((side) => call({
 	].join("\n"),
 })));
 check("different scripts still run in parallel", independent.every((result) => result.structuredContent.exit_code === 0 && result.structuredContent.stdout.trim() === "parallel"));
+
+const queuedPath = concurrent[0].structuredContent.script_path;
+const queuedSource = await readFile(queuedPath, "utf8");
+let releaseQueue;
+let enteredQueue;
+const queueHeld = new Promise((resolve) => { enteredQueue = resolve; });
+const queueRelease = new Promise((resolve) => { releaseQueue = resolve; });
+const { withFileMutationQueue } = await import(await resolvePiEntry());
+const holder = withFileMutationQueue(queuedPath, async () => { enteredQueue(); await queueRelease; });
+await queueHeld;
+try {
+	for (const params of [
+		{ name: "concurrent", code: "print('CANCELLED_REPLACEMENT')" },
+		{ path: queuedPath, edits: [{ oldText: "SECOND", newText: "CANCELLED_EDIT" }] },
+	]) {
+		const queuedAbort = new AbortController();
+		const pending = call(params, queuedAbort.signal).then(() => false, () => true);
+		queuedAbort.abort();
+		const promptlyCancelled = await Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve(false), 500))]);
+		check("queued cancellation returns before the file queue is released", promptlyCancelled);
+	}
+} finally {
+	releaseQueue();
+	await holder;
+}
+// A subsequent run waits for cancelled queue reservations to drain.
+await call({ path: queuedPath });
+check("cancelled queued creates and edits leave the script untouched", (await readFile(queuedPath, "utf8")) === queuedSource);
 
 console.log("run by path / argv");
 const rerun = await call({ path: third.structuredContent.script_path });
@@ -221,6 +276,21 @@ check("non-zero exit reported", failed.structuredContent.exit_code === 3);
 check("isError set", failed.isError === true);
 check("stderr captured", failed.structuredContent.stderr.includes("boom"));
 
+const previousInterpreter = process.env.PI_IPY_PYTHON;
+process.env.PI_IPY_PYTHON = join(workdir, "nonexistent-python");
+try {
+	const missingInterpreter = await call({ name: "missing_interpreter", code: "print('never runs')" });
+	check("interpreter startup failure closes output capture", missingInterpreter.structuredContent.exit_code === -1 && missingInterpreter.structuredContent.stderr.includes("failed to start"));
+} finally {
+	if (previousInterpreter === undefined) delete process.env.PI_IPY_PYTHON;
+	else process.env.PI_IPY_PYTHON = previousInterpreter;
+}
+const preAborted = new AbortController();
+preAborted.abort();
+let cancelledBeforeStart;
+try { await call({ name: "pre_aborted", code: "print('never runs')" }, preAborted.signal); } catch (error) { cancelledBeforeStart = error; }
+check("already-cancelled call writes no script", cancelledBeforeStart !== undefined && !(await stat(join(sessionDir, "pre_aborted.py")).then(() => true, () => false)));
+
 for (const [label, params] of [
 	["code + path rejected", { code: "print(1)", path: "/tmp/x.py" }],
 	["neither code nor path rejected", {}],
@@ -263,6 +333,12 @@ check("combined stdout/stderr has one byte budget", Buffer.byteLength(wide.conte
 check("truncated Unicode stays valid and keeps stderr tail", !wide.content[0].text.includes("\ufffd") && wide.content[0].text.includes("ERROR_SENTINEL"));
 const boundary = await call({ name: "unicode_boundary", code: "import sys,time\nsys.stdout.write('字' * 699051)\nsys.stdout.flush()\ntime.sleep(0.1)\nsys.stdout.write('AB')" });
 check("capture preserves ordering across the Unicode head boundary", (await readFile(boundary.structuredContent.output_path, "utf8")) === "--- stdout ---\n" + "字".repeat(699051) + "AB");
+const lossless = await call({ name: "lossless_output", code: "import sys\nsys.stdout.write('BEGIN\\n' + 'x' * (6 * 1024 * 1024) + '\\nEND\\n')\nsys.stderr.write('ERROR_BEGIN\\n' + 'y' * (5 * 1024 * 1024) + '\\nERROR_END\\n')" });
+const losslessOutput = await readFile(lossless.structuredContent.output_path, "utf8");
+check("disk output retains stdout beyond the memory cap", losslessOutput.includes("x".repeat(6 * 1024 * 1024)));
+check("disk output retains stderr beyond the memory cap", losslessOutput.includes("y".repeat(5 * 1024 * 1024)));
+check("saved output has no memory omission marker", !losslessOutput.includes("bytes omitted"));
+check("lossless disk output keeps the model view bounded", Buffer.byteLength(lossless.content[0].text) < 50 * 1024 + 1024);
 
 console.log("timeout / abort / process group");
 const slow = await call({ code: "import time\ntime.sleep(30)", name: "slow", timeout: 1 });
@@ -340,6 +416,19 @@ let manifestError;
 try { recoveredList = await call({ list: true }); } catch (error) { manifestError = error; }
 check("invalid manifest entries are skipped while valid stats survive", !manifestError && recoveredList.content[0].text === stats.content[0].text, manifestError?.message);
 await writeFile(manifestPath, originalManifest);
+
+if (process.platform === "linux") {
+	// Exercise a real disk-write failure without filling the filesystem.
+	const { runPython } = await import("../lib/run.ts");
+	const writeFailureScript = join(workdir, "write_failure.py");
+	await writeFile(writeFailureScript, "import time\nprint('disk write', flush=True)\ntime.sleep(30)\n");
+	let writeFailure;
+	try {
+		await runPython({ pythonPath: previousInterpreter || "python3", scriptPath: writeFailureScript, args: [], cwd: workdir, timeoutMs: 2000, stdoutSink: createWriteStream("/dev/full") });
+	} catch (error) { writeFailure = error; }
+	check("disk write failure stops the script and reports its cause", writeFailure?.message.startsWith("ipy:") && writeFailure.cause?.code === "ENOSPC", writeFailure?.message);
+}
+check("output spools are removed after success, failure, and cancellation", (await readdir(join(sessionDir, ".out"))).every((name) => name.endsWith(".out")));
 
 await rm(sessionDir, { recursive: true, force: true });
 await rm(workdir, { recursive: true, force: true });

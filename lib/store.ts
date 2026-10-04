@@ -17,10 +17,12 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { Readable, type Writable } from "node:stream";
+import { finished, pipeline } from "node:stream/promises";
 
 /** Shared length cap for script and directory names, to bound path length. */
 const NAME_MAX = 64;
@@ -280,13 +282,17 @@ export async function listScripts(dir: string): Promise<ScriptInfo[]> {
 	return infos;
 }
 
-/**
- * Persist the full output next to the scripts, for the case where the model-facing
- * view had to be truncated. Returns the path handed back to the model.
- */
-export async function saveFullOutput(dir: string, scriptPath: string, text: string): Promise<string> {
+export interface OutputCapture {
+	stdout: Writable;
+	stderr: Writable;
+	save(): Promise<string>;
+	discard(): Promise<void>;
+}
+
+/** Spool both streams to disk; publish their full contents only when a view is truncated. */
+export async function createOutputCapture(dir: string, scriptPath: string): Promise<OutputCapture> {
 	const outDir = join(dir, ".out");
-	await mkdir(outDir, { recursive: true, mode: DIR_MODE });
+	await ensurePrivateDir(outDir);
 	const base =
 		basename(scriptPath)
 			.replace(/\.py$/i, "")
@@ -294,10 +300,49 @@ export async function saveFullOutput(dir: string, scriptPath: string, text: stri
 			.replace(/^[.-]+/, "")
 			.slice(0, NAME_MAX) || "script";
 	const target = join(outDir, `${base}-${randomBytes(12).toString("hex")}.out`);
-	return withFileMutationQueue(target, async () => {
-		await writeFile(target, text, { mode: FILE_MODE, flag: "wx" });
-		return target;
-	});
+	const stdoutPath = `${target}.stdout`;
+	const stderrPath = `${target}.stderr`;
+	const stdoutHandle = await open(stdoutPath, "wx", FILE_MODE);
+	let stderrHandle: Awaited<ReturnType<typeof open>>;
+	try {
+		stderrHandle = await open(stderrPath, "wx", FILE_MODE);
+	} catch (error) {
+		await stdoutHandle.close();
+		await unlink(stdoutPath);
+		throw error;
+	}
+	const stdout = stdoutHandle.createWriteStream();
+	const stderr = stderrHandle.createWriteStream();
+	return {
+		stdout,
+		stderr,
+		async save() {
+			async function* sections() {
+				let separator = "";
+				for (const [path, label] of [[stdoutPath, "stdout"], [stderrPath, "stderr"]]) {
+					if ((await lstat(path)).size === 0) continue;
+					yield `${separator}--- ${label} ---\n`;
+					for await (const chunk of createReadStream(path)) yield chunk;
+					separator = "\n";
+				}
+			}
+			const outputHandle = await open(target, "wx", FILE_MODE);
+			try {
+				await pipeline(Readable.from(sections()), outputHandle.createWriteStream());
+			} catch (error) {
+				await unlink(target).catch(() => undefined);
+				throw error;
+			}
+			return target;
+		},
+		async discard() {
+			stdout.destroy();
+			stderr.destroy();
+			// Write failures are reported by runPython; disposal still closes both handles.
+			await Promise.all([stdout, stderr].map((sink) => finished(sink, { cleanup: true }).catch(() => undefined)));
+			await Promise.all([stdoutPath, stderrPath].map((path) => unlink(path)));
+		},
+	};
 }
 
 /** Content hash for a path-mode run, so the manifest shows when a file was edited. */

@@ -16,6 +16,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { delimiter } from "node:path";
+import type { Writable } from "node:stream";
+import { finished } from "node:stream/promises";
 import { StringDecoder } from "node:string_decoder";
 
 /** Hard ceiling on what is retained per stream. */
@@ -116,6 +119,10 @@ export interface RunOptions {
 	scriptPath: string;
 	args: string[];
 	cwd: string;
+	/** Scratchpad runs also search the project directory, like stdin execution. */
+	includeCwdInPath?: boolean;
+	stdoutSink?: Writable;
+	stderrSink?: Writable;
 	timeoutMs?: number;
 	signal?: AbortSignal;
 }
@@ -133,7 +140,8 @@ export interface RunResult {
 
 /** Run `pythonPath -u scriptPath args...` and resolve once the process is gone. */
 export function runPython(options: RunOptions): Promise<RunResult> {
-	return new Promise<RunResult>((resolveRun) => {
+	options.signal?.throwIfAborted();
+	return new Promise<RunResult>((resolveRun, rejectRun) => {
 		const startedAt = Date.now();
 		const stdout = new CappedText();
 		const stderr = new CappedText();
@@ -145,9 +153,23 @@ export function runPython(options: RunOptions): Promise<RunResult> {
 
 		const child = spawn(options.pythonPath, ["-u", options.scriptPath, ...options.args], {
 			cwd: options.cwd,
+			env: options.includeCwdInPath ? {
+				...process.env,
+				PYTHONPATH: [options.cwd, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
+			} : process.env,
 			detached: true,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
+		let outputError: unknown;
+		const sinks = [options.stdoutSink, options.stderrSink].filter((sink): sink is Writable => sink !== undefined);
+		const outputDone = Promise.all(sinks.map(async (sink) => {
+			try {
+				await finished(sink, { cleanup: true });
+			} catch (error) {
+				outputError = error;
+				if (child.pid !== undefined) killGroup(child.pid, "SIGKILL");
+			}
+		}));
 
 		const terminate = (why: "timeout" | "abort"): void => {
 			if (settled) return;
@@ -180,22 +202,32 @@ export function runPython(options: RunOptions): Promise<RunResult> {
 			if ((timedOut || aborted) && child.pid !== undefined) killGroup(child.pid, "SIGKILL");
 			clearTimeout(killTimer);
 			options.signal?.removeEventListener("abort", onAbort);
-			const out = stdout.finish();
-			const err = stderr.finish();
-			resolveRun({
-				exitCode,
-				stdout: out.text,
-				stderr: err.text,
-				stdoutTruncated: out.truncated,
-				stderrTruncated: err.truncated,
-				wallTimeSeconds: (Date.now() - startedAt) / 1000,
-				timedOut,
-				aborted,
-			});
+			// Spawn errors can close the pipes without emitting end, so finish sinks here too.
+			for (const sink of sinks) if (!sink.writableEnded) sink.end();
+			void outputDone.then(() => {
+				if (outputError !== undefined) {
+					rejectRun(new Error("ipy: failed to save script output; check disk space and permissions, then retry.", { cause: outputError }));
+					return;
+				}
+				const out = stdout.finish();
+				const err = stderr.finish();
+				resolveRun({
+					exitCode,
+					stdout: out.text,
+					stderr: err.text,
+					stdoutTruncated: out.truncated,
+					stderrTruncated: err.truncated,
+					wallTimeSeconds: (Date.now() - startedAt) / 1000,
+					timedOut,
+					aborted,
+				});
+			}).catch(rejectRun);
 		};
 
 		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
 		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+		if (options.stdoutSink) child.stdout?.pipe(options.stdoutSink);
+		if (options.stderrSink) child.stderr?.pipe(options.stderrSink);
 		child.on("error", (error: Error) => {
 			// Most commonly ENOENT: the interpreter is not on PATH.
 			stderr.push(Buffer.from(`failed to start ${options.pythonPath}: ${error.message}\n`, "utf8"));

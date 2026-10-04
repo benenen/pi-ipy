@@ -37,9 +37,11 @@ One tool, three modes — `code`, `path` and `list` are mutually exclusive;
 
 `args` goes through argv, so there is no shell quoting to escape. Output is capped at
 pi's own scale (2000 lines / 50 KB, whichever is hit first), keeping the tail;
-when truncated, captured output is saved to a file whose path comes back as `output_path`.
-Each stream has a 4 MiB capture ceiling, so the saved file also contains an omission
-marker when that ceiling was exceeded.
+stdout and stderr are streamed to temporary files during execution. When the view is
+truncated, their full contents are saved to a file returned as `output_path`.
+Each stream has a 4 MiB in-memory capture ceiling; omission markers in that excerpt
+do not discard data from the saved file. Temporary stream files are removed after
+the run; retained output files consume disk space in proportion to output size.
 
 `edits` matches the original file exactly: every `oldText` must occur once, and edits
 must not overlap. All replacements are validated before an atomic write; a failed
@@ -107,10 +109,16 @@ is how the arms of `scripts/acc-reuse.sh` are defined.
 
 - `python3` from `PATH`, or `$PI_IPY_PYTHON` when set; the working directory is pi's.
   `$PI_IPY_QUIET` turns off the two re-use lines in the result (for A/B measurement).
+- Source is saved unchanged, including leading whitespace and blank lines.
+  Session scratchpads add pi's working directory to the inherited `PYTHONPATH`, so
+  local project imports work on create and re-run. External `path` scripts keep
+  ordinary file execution's import behavior.
 - The child runs detached in its own process group, and abort/timeout kills the **whole
   group** — a script that spawned something else does not outlive it.
 - Calls targeting the same script hold pi's file mutation queue through execution
   and recording the result. Different scripts can still run in parallel.
+- A call cancelled while waiting for that queue returns promptly and skips its
+  write or edit when the reservation reaches the front.
 - Timeout is rounded up to at least 1 ms. Values above 2,147,483.647 seconds are
   rejected because they exceed Node's timer limit; omit it for no limit.
 - Results also come back as `structuredContent` (`exit_code`, `stdout`, `stderr`,

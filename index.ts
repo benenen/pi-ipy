@@ -18,7 +18,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -32,10 +32,10 @@ import { Type, type Static } from "typebox";
 import { type RunResult, runPython } from "./lib/run.ts";
 import {
 	appendManifest,
+	createOutputCapture,
 	editScript,
 	hashFile,
 	listScripts,
-	saveFullOutput,
 	saveScript,
 	sanitizeName,
 	type ScriptInfo,
@@ -118,7 +118,7 @@ type Mode =
 	| { kind: "run"; path: string; edits?: ScriptEdit[]; args: string[]; timeoutMs?: number };
 
 function parseInput(params: IpyInput): Mode {
-	const code = params.code?.trim();
+	const code = params.code?.trim() ? params.code : undefined;
 	const path = params.path?.trim();
 	if (params.edits !== undefined) {
 		if (!path || code || params.list === true) {
@@ -252,6 +252,28 @@ function renderRun(options: {
 	return lines.join("\n");
 }
 
+/** Cancel queue waiting immediately, and skip its reservation when it reaches the front. */
+async function withCancellableFileQueue<T>(path: string, signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
+	signal?.throwIfAborted();
+	if (!signal) return withFileMutationQueue(path, action);
+	let rejectAbort!: (reason: unknown) => void;
+	const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+	const onAbort = (): void => rejectAbort(signal.reason);
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([
+			withFileMutationQueue(path, async () => {
+				signal.throwIfAborted();
+				signal.removeEventListener("abort", onAbort);
+				return action();
+			}),
+			aborted,
+		]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "ipy",
@@ -272,6 +294,7 @@ export default function (pi: ExtensionAPI) {
 		annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			signal?.throwIfAborted();
 			const mode = parseInput(params);
 			const dir = await sessionDir(ctx.cwd, ctx.sessionManager.getSessionId());
 
@@ -296,7 +319,7 @@ export default function (pi: ExtensionAPI) {
 			const scriptName = mode.kind === "create" ? mode.name ?? fallbackName(mode.purpose) : "";
 			const scriptPath = mode.kind === "create" ? resolve(dir, sanitizeName(scriptName)) : resolve(ctx.cwd, mode.path);
 			// Hold the same queue as host edits/writes until this version has finished running.
-			return withFileMutationQueue(scriptPath, async () => {
+			return withCancellableFileQueue(scriptPath, signal, async () => {
 				let hash: string;
 				let state: string;
 				let reused = false;
@@ -328,71 +351,79 @@ export default function (pi: ExtensionAPI) {
 				}
 				const runMode = mode.kind === "run" && mode.edits ? "edit" : mode.kind;
 
-				const result = await runPython({
-					pythonPath: pythonPath(),
-					scriptPath,
-					args: mode.args,
-					cwd: ctx.cwd,
-					timeoutMs: mode.timeoutMs,
-					signal,
-				});
-
-				await appendManifest(dir, {
-					ts: new Date().toISOString(),
-					name: scriptPath.split("/").pop() ?? scriptPath,
-					path: scriptPath,
-					hash,
-					purpose: mode.kind === "create" ? mode.purpose : undefined,
-					mode: runMode,
-					reused,
-					exitCode: result.exitCode,
-					wallTimeSeconds: result.wallTimeSeconds,
-				});
-
-				const stdout = result.stdout.replace(/\n+$/, "");
-				const stderr = result.stderr.replace(/\n+$/, "");
-				const combined = [stdout ? `--- stdout ---\n${stdout}` : "", stderr ? `--- stderr ---\n${stderr}` : ""].filter(Boolean).join("\n");
-				const view = truncateTail(combined, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-
-				let fullOutputPath: string | undefined;
-				if (view.truncated) {
-					fullOutputPath = await saveFullOutput(dir, scriptPath, combined);
-				}
-
-				const text = renderRun({
-					scriptPath,
-					state,
-					result,
-					outputView: view.content,
-					timeoutSeconds: mode.timeoutMs === undefined ? undefined : mode.timeoutMs / 1000,
-					fullOutputPath,
-					alsoInSession,
-					suggestEdit: mode.kind === "create" && !process.env.PI_IPY_QUIET,
-				});
-
-				return {
-					content: [{ type: "text", text }],
-					details: {
-						mode: runMode,
+				const capture = await createOutputCapture(dir, scriptPath);
+				try {
+					const result = await runPython({
+						pythonPath: pythonPath(),
 						scriptPath,
+						args: mode.args,
+						cwd: ctx.cwd,
+						timeoutMs: mode.timeoutMs,
+						signal,
+						includeCwdInPath: dirname(scriptPath) === resolve(dir),
+						stdoutSink: capture.stdout,
+						stderrSink: capture.stderr,
+					});
+
+					await appendManifest(dir, {
+						ts: new Date().toISOString(),
+						name: scriptPath.split("/").pop() ?? scriptPath,
+						path: scriptPath,
+						hash,
+						purpose: mode.kind === "create" ? mode.purpose : undefined,
+						mode: runMode,
 						reused,
 						exitCode: result.exitCode,
 						wallTimeSeconds: result.wallTimeSeconds,
-						timedOut: result.timedOut,
-					} satisfies IpyDetails,
-					isError: result.exitCode !== 0,
-					structuredContent: {
-						exit_code: result.exitCode,
-						stdout: truncateHead(result.stdout, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
-						stderr: truncateHead(result.stderr, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
-						script_path: scriptPath,
-						reused,
-						wall_time_seconds: result.wallTimeSeconds,
-						...(fullOutputPath ? { output_path: fullOutputPath } : {}),
-						timed_out: result.timedOut,
-						aborted: result.aborted,
-					},
-				};
+					});
+
+					const stdout = result.stdout.replace(/\n+$/, "");
+					const stderr = result.stderr.replace(/\n+$/, "");
+					const combined = [stdout ? `--- stdout ---\n${stdout}` : "", stderr ? `--- stderr ---\n${stderr}` : ""].filter(Boolean).join("\n");
+					const view = truncateTail(combined, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+
+					let fullOutputPath: string | undefined;
+					if (view.truncated || result.stdoutTruncated || result.stderrTruncated) {
+						fullOutputPath = await capture.save();
+					}
+
+					const text = renderRun({
+						scriptPath,
+						state,
+						result,
+						outputView: view.content,
+						timeoutSeconds: mode.timeoutMs === undefined ? undefined : mode.timeoutMs / 1000,
+						fullOutputPath,
+						alsoInSession,
+						suggestEdit: mode.kind === "create" && !process.env.PI_IPY_QUIET,
+					});
+
+					return {
+						content: [{ type: "text", text }],
+						details: {
+							mode: runMode,
+							scriptPath,
+							reused,
+							exitCode: result.exitCode,
+							wallTimeSeconds: result.wallTimeSeconds,
+							timedOut: result.timedOut,
+						} satisfies IpyDetails,
+						isError: result.exitCode !== 0,
+						structuredContent: {
+							exit_code: result.exitCode,
+							stdout: truncateHead(result.stdout, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
+							stderr: truncateHead(result.stderr, { maxLines: DEFAULT_MAX_LINES, maxBytes: CODEMODE_MAX_BYTES }).content,
+							script_path: scriptPath,
+							reused,
+							wall_time_seconds: result.wallTimeSeconds,
+							...(fullOutputPath ? { output_path: fullOutputPath } : {}),
+							timed_out: result.timedOut,
+							aborted: result.aborted,
+						},
+					};
+				} finally {
+					await capture.discard();
+				}
 			});
 		},
 	});
