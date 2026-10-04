@@ -21,7 +21,7 @@
 | 被调解释器 | `/usr/bin/python3` | 3.14.4 | 可用 `PI_IPY_PYTHON` 覆盖 |
 | 构建工具 | 无 | — | 故意不加：jiti 直载 TS，加了反而多一层 |
 
-**不要引入 `node_modules`**：仓库里所有 `import` 都靠 pi 的 jiti 别名表在运行时解析（见 `scripts/smoke.mjs` 的 `PI_PACKAGE_ENTRY` 常量）。一旦本地装上依赖，加载路径就会分叉成"本地解析 vs pi 解析"两套，很难查。
+**开发依赖只用于类型检查**：首次 `npm ci` 安装已有 devDependencies，`node_modules/` 不入库，`package-lock.json` 入库。运行时的宿主依赖仍由 pi 的 jiti 别名表解析，必须另用 `scripts/smoke.mjs` 的真实宿主加载器验证；`PI_PACKAGE_ENTRY` 可指定宿主入口。不加构建步骤。
 
 ## 三、pi 扩展的写法约定
 

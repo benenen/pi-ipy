@@ -5,8 +5,8 @@
  *   node scripts/smoke.mjs
  *
  * The pi package is located from whatever installation owns the `pi` binary on PATH;
- * override with PI_PACKAGE_ENTRY when that guess is wrong. This repo has no node_modules
- * — extensions get their imports from pi's own jiti alias map at runtime.
+ * override with PI_PACKAGE_ENTRY when that guess is wrong. Extensions get their
+ * host imports from pi's own jiti alias map at runtime.
  *
  * Covers: registration, all three modes, name sanitising, content-based reuse,
  * re-run by path, argv, a non-zero exit, output truncation, timeout, abort,
@@ -152,7 +152,24 @@ console.log("fallback naming");
 const autoNamed = await call({ code: "print('auto')", purpose: "Parse NVR logs quickly" });
 check("name derives from purpose", autoNamed.structuredContent.script_path.endsWith("parse_nvr_logs_quickly.py"), autoNamed.structuredContent.script_path);
 const bare = await call({ code: "print('bare')" });
-check("timestamped name as last resort", /script_\d{6}\.py$/.test(bare.structuredContent.script_path), bare.structuredContent.script_path);
+check("timestamped name as last resort", /script_\d{6}(?:_[a-f0-9]+)?\.py$/.test(bare.structuredContent.script_path), bare.structuredContent.script_path);
+const RealDate = Date;
+globalThis.Date = class extends RealDate {
+	constructor(...args) { super(...(args.length ? args : ["2026-10-04T12:00:00Z"])); }
+};
+try {
+	const chinese = await call({ code: "print('first')", purpose: "统计课程数量" });
+	const different = await call({ code: "print('second')", purpose: "分析日志错误" });
+	check("different Chinese purposes get different paths", chinese.structuredContent.script_path !== different.structuredContent.script_path);
+	check("Chinese fallback preserves the first script", (await readFile(chinese.structuredContent.script_path, "utf8")) === "print('first')");
+	const repeated = await call({ code: "print('first')", purpose: "统计课程数量" });
+	check("same Chinese purpose reuses its path", repeated.structuredContent.script_path === chinese.structuredContent.script_path && repeated.structuredContent.reused);
+	const unnamed1 = await call({ code: "print('unnamed first')" });
+	const unnamed2 = await call({ code: "print('unnamed second')" });
+	check("unnamed scripts in the same second have distinct paths", unnamed1.structuredContent.script_path !== unnamed2.structuredContent.script_path);
+} finally {
+	globalThis.Date = RealDate;
+}
 
 console.log("re-use prompting (the two result lines the model decides on)");
 const neighbour = await call({ code: "print('third')", name: "third_script", purpose: "count tool calls per session" });
@@ -217,6 +234,10 @@ if (big.structuredContent.output_path) {
 check("model view mentions the full output path", big.content[0].text.includes("full output:"));
 check("model view actually enforces the byte cap", Buffer.byteLength(big.content[0].text) < 50 * 1024 + 1024);
 check("model view retains the end of stdout", big.content[0].text.includes("4999 "));
+const previousOutput = await readFile(big.structuredContent.output_path, "utf8");
+const bigAgain = await call({ name: "big", code: "for i in range(5000): print('SECOND_RUN', i)" });
+check("rerun has its own output path", bigAgain.structuredContent.output_path !== big.structuredContent.output_path);
+check("rerun preserves the earlier output", (await readFile(big.structuredContent.output_path, "utf8")) === previousOutput);
 const wide = await call({ name: "wide", code: "import sys\nprint('字' * 30000)\nsys.stderr.write('尾' * 30000 + 'ERROR_SENTINEL')" });
 check("combined stdout/stderr has one byte budget", Buffer.byteLength(wide.content[0].text) < 50 * 1024 + 1024);
 check("truncated Unicode stays valid and keeps stderr tail", !wide.content[0].text.includes("\ufffd") && wide.content[0].text.includes("ERROR_SENTINEL"));
@@ -242,6 +263,32 @@ check("abort returns quickly", aborted.structuredContent.wall_time_seconds < 10,
 await new Promise((resolve) => setTimeout(resolve, 2500));
 const { stdout: psOut } = await execFileAsync("ps", ["-eo", "args"]).catch(() => ({ stdout: "" }));
 check("grandchild killed with the group", !psOut.includes(marker));
+
+for (const reason of ["timeout", "abort"]) {
+	const survivorPath = join(workdir, `survivor-${reason}`);
+	const pidPath = join(workdir, `survivor-${reason}.pid`);
+	const readyPath = join(workdir, `ready-${reason}`);
+	const childCode = `import signal,time,pathlib; signal.signal(signal.SIGTERM,signal.SIG_IGN); pathlib.Path(${JSON.stringify(readyPath)}).touch(); time.sleep(3); pathlib.Path(${JSON.stringify(survivorPath)}).touch()`;
+	const parentCode = [
+		"import subprocess,sys,time,pathlib",
+		`p = subprocess.Popen([sys.executable, '-c', ${JSON.stringify(childCode)}], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`,
+		`pathlib.Path(${JSON.stringify(pidPath)}).write_text(str(p.pid))`,
+		"time.sleep(30)",
+	].join("\n");
+	const cancellation = new AbortController();
+	const timer = reason === "abort" ? setTimeout(() => cancellation.abort(), 1000) : undefined;
+	try {
+		const result = await call({ name: `detached_${reason}`, code: parentCode, ...(reason === "timeout" ? { timeout: 1 } : {}) }, cancellation.signal);
+		check(`${reason} reached a TERM-ignoring descendant`, await stat(readyPath).then(() => true, () => false));
+		check(`${reason} reported termination`, result.structuredContent[reason === "timeout" ? "timed_out" : "aborted"]);
+		await new Promise((resolve) => setTimeout(resolve, 3100));
+		check(`${reason} kills descendants after the parent closes its pipes`, !(await stat(survivorPath).then(() => true, () => false)));
+	} finally {
+		clearTimeout(timer);
+		const pid = Number(await readFile(pidPath, "utf8"));
+		try { process.kill(pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+	}
+}
 
 console.log("manifest / list");
 const listing = await call({ list: true });

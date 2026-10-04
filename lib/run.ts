@@ -150,6 +150,7 @@ export function runPython(options: RunOptions): Promise<RunResult> {
 			if (settled) return;
 			if (why === "timeout") timedOut = true;
 			else aborted = true;
+			if (killTimer !== undefined) return;
 			if (child.pid !== undefined) killGroup(child.pid, "SIGTERM");
 			// Escalate if the script (or a child of it) ignores SIGTERM.
 			killTimer = setTimeout(() => {
@@ -172,6 +173,8 @@ export function runPython(options: RunOptions): Promise<RunResult> {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeoutTimer);
+			// The parent may close its pipes while TERM-ignoring descendants are still alive.
+			if ((timedOut || aborted) && child.pid !== undefined) killGroup(child.pid, "SIGKILL");
 			clearTimeout(killTimer);
 			options.signal?.removeEventListener("abort", onAbort);
 			const out = stdout.finish();

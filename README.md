@@ -58,12 +58,15 @@ session's scripts; ordinary `path` runs keep accepting external files.
 - **Named, not hashed.** Real sessions showed the model omitting `name`, and a hashed
   file it cannot remember is a file it cannot re-use — so a missing `name` is slugged
   from `purpose` instead (`top-3 tools per pi session file` → `tool_calls_by_session.py`),
-  with a timestamped name as the last resort.
+  with a stable purpose hash when no usable ASCII slug exists (including Chinese
+  purposes), or a timestamp plus random suffix when no purpose is supplied.
 - Same name + same content hash → reused, and said so in the result. Same name + new
   content → replaced. That replacement, plus pi's own `edit`, is how a script changes.
 - Writes go through a temp file + `rename`, so a killed process cannot leave half a
   script behind. `.index.jsonl` appends one line per run: timestamp, name, path,
   content hash, purpose, mode, exit code and wall time.
+- Truncated output gets a separate file per run, so re-running a script preserves
+  output paths returned by earlier calls.
 
 ## Re-use works, as a rewrite rather than an edit
 
@@ -125,7 +128,7 @@ Both trials, including the unfavorable one, are recorded in
 ## Install
 
 pi discovers each **directory** under its agent dir's `extensions/`, so installing is a
-symlink and there is no build step and no `node_modules`:
+symlink and there is no build step or runtime dependency installation:
 
 ```sh
 ln -sfn "$PWD" "${PI_AGENT_DIR:-$HOME/.pi/agent}/extensions/pi-ipy"
@@ -133,7 +136,10 @@ ln -sfn "$PWD" "${PI_AGENT_DIR:-$HOME/.pi/agent}/extensions/pi-ipy"
 
 ## Verify
 
+Install development dependencies with `npm ci` before type checking.
+
 ```sh
+npm run typecheck
 node scripts/smoke.mjs    # storage, edit transactions, bounded output, abort, timeout
 python3 -B scripts/test-efficiency.py  # successful execution and usage accounting
 ```

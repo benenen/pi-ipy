@@ -20,12 +20,12 @@
 
 # 通用条目（跨语言）
 
-## 1. 不引入 `node_modules`、不加构建步骤
+## 1. 开发依赖不入库、不加构建步骤
 
-本仓库所有 `import`（含 `typebox`、`@earendil-works/pi-coding-agent`）都由 pi 的 jiti 别名表在运行时分发。一旦本地装上依赖，加载路径就分叉成「本地解析 vs pi 解析」两套，问题极难复现。
+运行时所有宿主 `import`（含 `typebox`、`@earendil-works/pi-coding-agent`）由 pi 的 jiti 别名表分发。已有 devDependencies 用于 `tsc` 类型检查；`node_modules/` 不入库，`package-lock.json` 入库以固定开发依赖。
 
-- 反例：为跑 `tsc --noEmit` 而 `npm i -D typescript` → 顺带生成 `node_modules/` + lock 文件，`pi -e ./index.ts` 与软链安装下的解析行为可能不一致；本机根本没有 `tsc`，那条 `check` 脚本是死的。
-- 正例：验证一律走 `node scripts/smoke.mjs`（自己用 `PI_PACKAGE_ENTRY` 指向 pi 的本地安装），类型问题交给编辑器 LSP。
+- 反例：只跑本地 `tsc` 就认定宿主加载成功，或把 `node_modules/` 提交进仓库。
+- 正例：首次 `npm ci` 安装已有开发依赖，运行 `npm run typecheck`；另跑 `node scripts/smoke.mjs`，用真实宿主加载器验证运行行为（可用 `PI_PACKAGE_ENTRY` 指定宿主入口）。安装扩展仍不需要构建步骤。
 
 ## 2. 禁止 1+N：循环里不查库、不调远程接口
 
@@ -109,7 +109,7 @@
 
 > 以下条目叠加在《JavaScript 专项》之上，JS 的条目同样适用。
 >
-> 本仓库**没有 `tsconfig.json`、也没有 `tsc`**（见上文通用条目 1），所以 T1 的落点是「写代码时按 `strict` 的标准要求自己」，而不是去加一个配置文件。
+> 本仓库已有 `tsconfig.json` 与 TypeScript 开发依赖，使用 `npm run typecheck` 执行严格类型检查。
 
 ## T1. `strict` 必开，禁止关掉 `strictNullChecks`
 

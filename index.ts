@@ -16,6 +16,7 @@
  * lib/run.ts for how the child process is capped and killed.
  */
 
+import { createHash, randomBytes } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
@@ -157,7 +158,8 @@ function parseInput(params: IpyInput): Mode {
  *
  * Prefers a slug of `purpose`: real sessions show the model omitting `name`, and a
  * semantic file name is what makes the script findable again 40 turns later. A
- * timestamped name is the last resort, when there is no usable purpose either.
+ * purpose hash handles non-ASCII notes; a timestamp plus random suffix is the last
+ * resort when no purpose was supplied.
  */
 function fallbackName(purpose?: string): string {
 	const slug = (purpose ?? "")
@@ -167,10 +169,13 @@ function fallbackName(purpose?: string): string {
 		.slice(0, 48)
 		.replace(/_+$/, "");
 	if (slug.replace(/_/g, "").length >= 4) return slug;
+	if (purpose?.trim()) {
+		return `script_${createHash("sha256").update(purpose.trim(), "utf8").digest("hex").slice(0, 16)}`;
+	}
 
 	const pad = (value: number): string => String(value).padStart(2, "0");
 	const now = new Date();
-	return `script_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+	return `script_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}_${randomBytes(6).toString("hex")}`;
 }
 
 function renderList(dir: string, scripts: ScriptInfo[]): string {

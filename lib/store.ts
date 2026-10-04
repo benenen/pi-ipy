@@ -280,9 +280,9 @@ export async function saveFullOutput(dir: string, scriptPath: string, text: stri
 			.replace(ILLEGAL_IN_NAME, "_")
 			.replace(/^[.-]+/, "")
 			.slice(0, NAME_MAX) || "script";
-	const target = join(outDir, `${base}.out`);
+	const target = join(outDir, `${base}-${randomBytes(12).toString("hex")}.out`);
 	return withFileMutationQueue(target, async () => {
-		await writeFile(target, text, { mode: FILE_MODE });
+		await writeFile(target, text, { mode: FILE_MODE, flag: "wx" });
 		return target;
 	});
 }

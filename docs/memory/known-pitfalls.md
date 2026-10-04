@@ -2,6 +2,10 @@
 
 > ipy 实现与「模型会不会真用」相关的实测记录；动手改工具面或提示文案前先扫一遍。
 
+- **2026-10-04｜进程组清理不能只看主进程 close（已修复）**：Python 主进程超时退出后，stdout/stderr 指向 DEVNULL、忽略 SIGTERM 的子进程仍存活；原因是 settle() 提前清除强杀定时器。→ 终止后的 settle() 在清定时器前对剩余进程组发 SIGKILL；重复终止不创建第二个定时器。smoke 分别覆盖 timeout 与 abort，并确认子进程先安装忽略 TERM 的处理器，随后没有写出延迟文件（lib/run.ts、scripts/smoke.mjs，83/83 项通过）。
+- **2026-10-04｜中文用途和无用途的默认名不能只用秒级时间（已修复）**：不同中文用途在同一秒退回相同脚本名，第二次创建覆盖第一次。→ fallbackName() 对没有可用 ASCII slug 的非空用途生成稳定 SHA-256 前缀，无用途时使用时间加随机后缀；smoke 固定时间验证不同用途不覆盖、相同用途可复用、无用途创建不撞名（index.ts、scripts/smoke.mjs）。
+- **2026-10-04｜截断输出必须按运行独立保存（已修复）**：同名脚本第二次运行覆盖固定 .out/<脚本名>.out，导致第一次返回的 output_path 读到第二次内容。→ saveFullOutput() 给每次输出加随机后缀，并用 wx 独占创建；smoke 检查两次路径不同且第一次文件内容保持不变（lib/store.ts、scripts/smoke.mjs）。
+
 - **2026-10-02｜模型会省略 `name` 参数（3/3 次真实调用都没给）**。落成 `script_232635.py` 这种名字——40 轮后模型既记不住也引用不回来，"复用"就成了空话（现象来自 `/tmp/ipy-acc/a.json` 与 `b.json` 的工具调用序列）。→ 结论：`index.ts` 的 `fallbackName()` 改为优先按 `purpose` 推导语义名（`purpose: "top-3 tools per pi session file"` → `tool_calls_by_session.py`，实测已验证），时间戳名只作最后兜底。
 - **2026-10-02｜`truncateMiddle` 不在 pi 的导出面上**。包只导出 `truncateHead` / `truncateTail` / `truncateLine` / `DEFAULT_MAX_LINES` / `DEFAULT_MAX_BYTES` / `formatSize` 等；照 bash 工具体验直接写 `truncateMiddle(...)` 会在运行时报 `TypeError: (0 , _piCodingAgent.truncateMiddle) is not a function`（当时类型检查也拦不住——那时本仓库没有 tsc；2026-10-03 起有了，见文末）。→ 结论：codemode 用的 `structuredContent.stdout/stderr` 改用 `truncateHead`（1 MiB / 2000 行），模型看的文本视图仍用 `truncateTail`（保尾部、对齐 bash 工具）。
 - **2026-10-02｜单跑的 A/B 是噪声，不能当证据**。同一模型（`deepseek-v4.1-flash`）、**逐字节相同的系统提示**（比对过 guideline 与 snippet）、同一提示词，`scripts/acc-rate.sh` 实测 n=4 时 ipy 命中 3/4；而另一次 5 轮会话（`/tmp/ipy-acc/base/`）5 轮一次 ipy 都没用——`ipy` 工具当时确实已加载、guideline 也在系统提示里。→ 结论：这类问题只能报比率，且必须 `--model` 钉死模型；此前 environment.md 里「guideline 咬上了」的单次结论已按此重写。

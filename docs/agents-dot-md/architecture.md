@@ -55,7 +55,7 @@
     <cwd 名>-<sessionId 前 8 位>/
         parse_logs.py        ← 模型自己起的名字（或由 purpose 推导）
         .index.jsonl
-        .out/<script>.out    ← 输出被截断时落的全量文件
+        .out/<script>-<rand>.out ← 输出被截断时落的全量文件，每次运行独立保存
         .tmp-<pid>-<rand>    ← 写入中转，rename 后消失
 ```
 
